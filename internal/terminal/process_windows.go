@@ -107,10 +107,12 @@ func (p *Process) readLoop(reader io.Reader) {
 	buffer := make([]byte, 4096)
 	for {
 		n, err := reader.Read(buffer)
-		if n > 0 && p.onOutput != nil {
+		if n > 0 {
 			chunk := append([]byte(nil), buffer[:n]...)
 			p.broadcast(chunk)
-			p.onOutput(p.sessionID, string(chunk))
+			if p.onOutput != nil {
+				p.onOutput(p.sessionID, string(chunk))
+			}
 		}
 		if err != nil {
 			return
@@ -131,7 +133,17 @@ func (p *Process) broadcast(chunk []byte) {
 
 func (p *Process) wait() {
 	err := p.cmd.Wait()
+	p.closeSubscribers()
 	if p.onExit != nil {
 		p.onExit(p.sessionID, err)
+	}
+}
+
+func (p *Process) closeSubscribers() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for id, sub := range p.subs {
+		delete(p.subs, id)
+		close(sub)
 	}
 }

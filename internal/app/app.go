@@ -5,16 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	"agent-chat-local/internal/hostclient"
 	"agent-chat-local/internal/mirror"
 	"agent-chat-local/internal/provider"
 	"agent-chat-local/internal/session"
-	"agent-chat-local/internal/terminal"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -25,8 +24,7 @@ type App struct {
 	ctx       context.Context
 	registry  *session.Registry
 	providers []provider.Provider
-	mirror    *mirror.Server
-	terminals *terminal.Manager
+	host      *hostclient.Client
 	outputs   *outputFilter
 }
 
@@ -44,30 +42,17 @@ type Bootstrap struct {
 func New() *App {
 	providers := provider.Defaults()
 	registry := session.NewRegistry()
-	terminals := terminal.NewManager()
 
 	return &App{
 		registry:  registry,
 		providers: providers,
-		mirror:    nil,
-		terminals: terminals,
+		host:      hostclient.New(""),
 		outputs:   newOutputFilter(),
 	}
 }
 
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
-	if a.mirror == nil {
-		a.mirror = mirror.NewServer(a.terminals, func(sessionID string, data []byte) {
-			a.handleTerminalOutput(sessionID, string(data))
-		}, func(sessionID string) {
-			_, _ = a.registry.SetTerminal(sessionID, true, 0)
-			_, _ = a.registry.SetStatus(sessionID, session.Idle, "")
-			_, _ = a.registry.SetLastMessage(sessionID, "Terminal externo conectado.")
-			a.emitState()
-		})
-	}
-	_ = a.mirror.Start("127.0.0.1:47656")
 	a.emitState()
 }
 
@@ -102,32 +87,28 @@ func (a *App) CreateChat(input session.CreateInput) (session.Session, error) {
 	}
 
 	created := a.registry.Create(input, item)
-	if runtime.GOOS == "darwin" {
-		runCommand := "agentctl run " + created.ID + " " + shellJoin(append([]string{item.Command}, item.Args...))
-		created, _ = a.registry.SetExternalAttach(created.ID, runCommand)
-		created, _ = a.registry.SetWaiting(created.ID, fmt.Sprintf("%s aguardando terminal externo.", item.Name))
+	created, _ = a.registry.SetExternalAttach(created.ID, "agent-host serve")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.host.Health(ctx); err != nil {
+		created, _ = a.registry.SetWaiting(created.ID, "Inicie o host: agent-host serve")
 		a.emitState()
 		return created, nil
 	}
 
-	process, err := a.terminals.Start(terminal.StartOptions{
-		SessionID: created.ID,
-		Command:   item.Command,
-		Args:      item.Args,
-		CWD:       created.CWD,
-		OnOutput:  a.handleTerminalOutput,
-		OnExit:    a.handleTerminalExit,
-	})
+	pid, err := a.startTerminalSession(created.ID, item, created.CWD)
 	if err != nil {
-		_, _ = a.registry.SetStatus(created.ID, session.Offline, "")
-		updated, _ := a.registry.SetLastMessage(created.ID, "Falha ao iniciar "+item.CLI)
+		created, _ = a.registry.SetWaiting(created.ID, "agent-host online, mas o terminal nao iniciou: "+err.Error())
 		a.emitState()
-		return updated, err
+		return created, nil
 	}
 
-	created, _ = a.registry.SetTerminal(created.ID, true, process.PID())
+	created, _ = a.registry.SetTerminal(created.ID, true, pid)
+	created, _ = a.registry.SetExternalAttach(created.ID, "agentctl attach "+created.ID)
+	created, _ = a.registry.SetLastMessage(created.ID, fmt.Sprintf("%s pronto no terminal local.", item.Name))
 	a.outputs.register(created.ID)
-	created, _ = a.registry.SetLastMessage(created.ID, fmt.Sprintf("%s conectado em terminal oculto.", item.Name))
+	a.subscribeHost(created.ID)
 	a.emitState()
 	return created, nil
 }
@@ -150,6 +131,13 @@ func (a *App) SendMessage(input session.SendInput) (session.Session, error) {
 		return session.Session{}, errors.New("message cannot be empty")
 	}
 
+	current, ok := a.registry.Get(input.SessionID)
+	if !ok {
+		return session.Session{}, errors.New("session not found")
+	}
+	if current.Status == session.Busy {
+		return current, errors.New("aguarde a resposta atual terminar")
+	}
 	if _, err := a.registry.AppendUser(input.SessionID, text); err != nil {
 		return session.Session{}, err
 	}
@@ -157,18 +145,12 @@ func (a *App) SendMessage(input session.SendInput) (session.Session, error) {
 		return session.Session{}, err
 	}
 	a.outputs.rememberInput(input.SessionID, text)
-	if err := a.terminals.SendLine(input.SessionID, text); err != nil {
-		if a.mirror != nil && a.mirror.Send(input.SessionID, []byte(text+"\r")) {
-			updated, _ := a.registry.Get(input.SessionID)
-			a.emitState()
-			return updated, nil
-		}
+	if err := a.runPrompt(input.SessionID, text); err != nil {
 		_, _ = a.registry.SetStatus(input.SessionID, session.Waiting, "")
-		updated, _ := a.registry.SetLastMessage(input.SessionID, "Terminal ainda nao conectado.")
+		updated, _ := a.registry.SetLastMessage(input.SessionID, err.Error())
 		a.emitState()
-		return updated, errors.New("terminal ainda nao conectado; use o comando exibido no topo do chat")
+		return updated, err
 	}
-
 	updated, _ := a.registry.Get(input.SessionID)
 	a.emitState()
 	return updated, nil
@@ -183,10 +165,22 @@ func (a *App) ExternalAttachCommand(sessionID string) (string, error) {
 }
 
 func (a *App) MirrorStatus() mirror.Status {
-	if a.mirror == nil {
-		return mirror.Status{}
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	if err := a.host.Health(ctx); err != nil {
+		return mirror.Status{
+			Enabled: false,
+			Mode:    "host-offline",
+			Address: hostclient.DefaultHTTPAddress,
+			Note:    "agent-host offline. Rode: agent-host serve",
+		}
 	}
-	return a.mirror.Status()
+	return mirror.Status{
+		Enabled: true,
+		Mode:    "agent-host",
+		Address: hostclient.DefaultHTTPAddress,
+		Note:    "agent-host online.",
+	}
 }
 
 func (a *App) providerByID(id provider.ID) (provider.Provider, bool) {
@@ -199,21 +193,28 @@ func (a *App) providerByID(id provider.ID) (provider.Provider, bool) {
 }
 
 func (a *App) handleTerminalOutput(sessionID string, raw string) {
-	a.outputs.add(sessionID, raw, func(text string) {
-		if text == "" {
-			return
-		}
-		if len(text) > 4000 {
-			text = text[:4000] + "\n[saida truncada]"
-		}
-		_, _ = a.registry.AppendAssistant(sessionID, text)
-		_, _ = a.registry.SetStatus(sessionID, session.Idle, "")
-		a.emitState()
-	})
+	_, _ = a.registry.AppendTerminalOutput(sessionID, raw)
+	current, ok := a.registry.Get(sessionID)
+	if ok && current.Status == session.Busy {
+		a.outputs.add(sessionID, raw, func(text string) {
+			if text == "" {
+				_, _ = a.registry.SetStatus(sessionID, session.Idle, "")
+				a.emitState()
+				return
+			}
+			if len(text) > 4000 {
+				text = text[:4000] + "\n[saida truncada]"
+			}
+			_, _ = a.registry.AppendAssistant(sessionID, text)
+			_, _ = a.registry.SetStatus(sessionID, session.Idle, "")
+			a.emitState()
+		})
+		return
+	}
+	a.emitState()
 }
 
 func (a *App) handleTerminalExit(sessionID string, err error) {
-	a.terminals.Forget(sessionID)
 	a.outputs.flush(sessionID, func(text string) {
 		if text != "" {
 			_, _ = a.registry.AppendAssistant(sessionID, text)
@@ -227,6 +228,83 @@ func (a *App) handleTerminalExit(sessionID string, err error) {
 	_, _ = a.registry.SetLastMessage(sessionID, status)
 	_, _ = a.registry.SetStatus(sessionID, session.Offline, "")
 	a.emitState()
+}
+
+func (a *App) subscribeHost(sessionID string) {
+	go func() {
+		err := a.host.Subscribe(context.Background(), sessionID, func(event hostclient.Event) {
+			switch event.Type {
+			case "output":
+				a.handleTerminalOutput(sessionID, string(event.Data))
+			case "exit":
+				a.handleTerminalExit(sessionID, nil)
+			}
+		})
+		if err != nil {
+			_, _ = a.registry.SetTerminal(sessionID, false, 0)
+			_, _ = a.registry.SetStatus(sessionID, session.Waiting, "")
+			_, _ = a.registry.SetLastMessage(sessionID, "Conexao com agent-host perdida.")
+			a.emitState()
+		}
+	}()
+}
+
+func (a *App) runPrompt(sessionID string, text string) error {
+	item, ok := a.registry.Get(sessionID)
+	if !ok {
+		return errors.New("session not found")
+	}
+	provider, ok := a.providerByID(item.ProviderID)
+	if !ok {
+		return errors.New("provider not found")
+	}
+
+	if !item.TerminalAttached {
+		pid, err := a.startTerminalSession(sessionID, provider, item.CWD)
+		if err != nil {
+			return errors.New("agent-host nao iniciou o terminal: " + err.Error())
+		}
+		_, _ = a.registry.SetTerminal(sessionID, true, pid)
+		_, _ = a.registry.SetExternalAttach(sessionID, "agentctl attach "+sessionID)
+		a.outputs.register(sessionID)
+		a.subscribeHost(sessionID)
+	}
+
+	_, _ = a.registry.SetExternalAttach(sessionID, "agentctl attach "+sessionID)
+	_, _ = a.registry.SetLastMessage(sessionID, "Executando no terminal local.")
+	a.emitState()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.host.Send(ctx, sessionID, text); err != nil {
+		if pid, startErr := a.startTerminalSession(sessionID, provider, item.CWD); startErr == nil {
+			_, _ = a.registry.SetTerminal(sessionID, true, pid)
+			_, _ = a.registry.SetExternalAttach(sessionID, "agentctl attach "+sessionID)
+			a.outputs.register(sessionID)
+			a.subscribeHost(sessionID)
+			time.Sleep(200 * time.Millisecond)
+			err = a.host.Send(ctx, sessionID, text)
+		}
+		if err != nil {
+			return errors.New("agent-host nao enviou a mensagem ao terminal: " + err.Error())
+		}
+	}
+	return nil
+}
+
+func (a *App) startTerminalSession(sessionID string, item provider.Provider, cwd string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started, err := a.host.Start(ctx, hostclient.StartInput{
+		SessionID: sessionID,
+		Command:   item.Command,
+		Args:      item.Args,
+		CWD:       cwd,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return started.PID, nil
 }
 
 func cleanTerminalText(raw string) string {
@@ -246,21 +324,6 @@ func cleanTerminalText(raw string) string {
 	}, cleaned)
 	cleaned = strings.TrimSpace(cleaned)
 	return cleaned
-}
-
-func shellJoin(parts []string) string {
-	quoted := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		if strings.ContainsAny(part, " \t\n'\"\\$`") {
-			quoted = append(quoted, "'"+strings.ReplaceAll(part, "'", "'\\''")+"'")
-			continue
-		}
-		quoted = append(quoted, part)
-	}
-	return strings.Join(quoted, " ")
 }
 
 type outputFilter struct {
@@ -301,7 +364,7 @@ func (f *outputFilter) add(sessionID string, raw string, emit func(string)) {
 	if timer := f.timers[sessionID]; timer != nil {
 		timer.Stop()
 	}
-	f.timers[sessionID] = time.AfterFunc(450*time.Millisecond, func() {
+	f.timers[sessionID] = time.AfterFunc(2200*time.Millisecond, func() {
 		f.flush(sessionID, emit)
 	})
 	f.mu.Unlock()
@@ -352,6 +415,12 @@ func shouldDropTerminalLine(line string, lastInput string) bool {
 	if lastInput != "" && strings.EqualFold(strings.TrimSpace(line), lastInput) {
 		return true
 	}
+	if lastInput != "" {
+		withoutPrompt := strings.TrimLeft(line, ">› $")
+		if strings.EqualFold(strings.TrimSpace(withoutPrompt), lastInput) {
+			return true
+		}
+	}
 
 	trimmed := strings.Trim(line, " .-|+=_*")
 	if trimmed == "" {
@@ -365,7 +434,18 @@ func shouldDropTerminalLine(line string, lastInput string) bool {
 		"ctrl+d",
 		"press enter",
 		"thinking",
+		"tinkering",
 		"cwd:",
+		"welcome back",
+		"what's new",
+		"tips for getting started",
+		"run /init",
+		"release-notes",
+		"mcp server failed",
+		"running stop hooks",
+		"tokens)",
+		"claude code",
+		"esc to interrupt",
 	}
 	lower := strings.ToLower(line)
 	for _, drop := range drops {

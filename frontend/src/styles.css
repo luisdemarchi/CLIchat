@@ -235,7 +235,7 @@ select {
 .conversation {
   display: grid;
   min-width: 0;
-  grid-template-rows: 72px minmax(0, 1fr) 74px;
+  grid-template-rows: 72px minmax(0, 1fr) auto 74px;
   background:
     linear-gradient(rgba(248, 248, 244, 0.9), rgba(248, 248, 244, 0.9)),
     repeating-linear-gradient(45deg, #dfe4dc 0, #dfe4dc 1px, transparent 1px, transparent 18px);
@@ -268,6 +268,7 @@ select {
 }
 
 .conversation-header {
+  grid-row: 1;
   min-width: 0;
   padding: 12px 18px;
   border-bottom: 1px solid #d9ddd4;
@@ -317,6 +318,7 @@ select {
 }
 
 .messages {
+  grid-row: 2;
   display: flex;
   min-height: 0;
   flex-direction: column;
@@ -364,6 +366,7 @@ select {
 }
 
 .composer {
+  grid-row: 4;
   padding: 12px 18px;
   border-top: 1px solid #d9ddd4;
   background: #f6f7f2;
@@ -400,6 +403,47 @@ select {
 .composer button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.terminal-panel {
+  grid-row: 3;
+  display: grid;
+  max-height: 260px;
+  grid-template-rows: 38px minmax(0, 1fr);
+  border-top: 1px solid #252a25;
+  background: #101410;
+  color: #d9e6d6;
+}
+
+.terminal-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #2d352d;
+  padding: 0 12px;
+  color: #edf4ea;
+}
+
+.terminal-panel header strong {
+  font-size: 13px;
+}
+
+.terminal-panel header button {
+  border: 0;
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: #d9e6d6;
+  background: #263026;
+}
+
+.terminal-panel pre {
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
 .connect-panel {

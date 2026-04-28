@@ -49,19 +49,20 @@ func (r *Registry) Create(input CreateInput, item provider.Provider) Session {
 
 	id := newID()
 	session := &Session{
-		ID:             id,
-		Title:          title,
-		ProviderID:     item.ID,
-		ProviderTag:    item.Tag,
-		ProviderAccent: item.Accent,
-		Status:         Idle,
-		CWD:            strings.TrimSpace(input.CWD),
-		AvatarLabel:    avatarLabel(title, item.Name),
-		LastMessage:    "Iniciando terminal...",
-		ExternalAttach: fmt.Sprintf("agentctl attach %s", id),
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		Messages:       []Message{},
+		ID:                id,
+		Title:             title,
+		ProviderID:        item.ID,
+		ProviderSessionID: newUUID(),
+		ProviderTag:       item.Tag,
+		ProviderAccent:    item.Accent,
+		Status:            Idle,
+		CWD:               strings.TrimSpace(input.CWD),
+		AvatarLabel:       avatarLabel(title, item.Name),
+		LastMessage:       "Iniciando terminal...",
+		ExternalAttach:    fmt.Sprintf("agentctl attach %s", id),
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		Messages:          []Message{},
 	}
 
 	r.mu.Lock()
@@ -207,6 +208,22 @@ func (r *Registry) SetExternalAttach(sessionID string, command string) (Session,
 	return clone(*session), nil
 }
 
+func (r *Registry) AppendTerminalOutput(sessionID string, text string) (Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	session, ok := r.sessions[sessionID]
+	if !ok {
+		return Session{}, errors.New("session not found")
+	}
+	session.TerminalOutput += text
+	if len(session.TerminalOutput) > 120_000 {
+		session.TerminalOutput = session.TerminalOutput[len(session.TerminalOutput)-120_000:]
+	}
+	session.UpdatedAt = timestamp()
+	return clone(*session), nil
+}
+
 func (r *Registry) appendMessage(sessionID string, message Message) (Session, error) {
 	if message.Text == "" {
 		return Session{}, errors.New("message cannot be empty")
@@ -239,6 +256,16 @@ func newID() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(bytes[:])
+}
+
+func newUUID() string {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return fmt.Sprintf("00000000-0000-4000-8000-%012d", time.Now().UnixNano()%1_000_000_000_000)
+	}
+	bytes[6] = (bytes[6] & 0x0f) | 0x40
+	bytes[8] = (bytes[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
 }
 
 func avatarLabel(title string, fallback string) string {

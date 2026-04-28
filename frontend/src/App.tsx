@@ -22,6 +22,7 @@ export function App() {
   const [draft, setDraft] = useState('');
   const [newProvider, setNewProvider] = useState<ProviderId>('claude');
   const [error, setError] = useState('');
+  const [terminalOpen, setTerminalOpen] = useState(false);
 
   useEffect(() => {
     getBootstrap().then((payload) => {
@@ -38,7 +39,7 @@ export function App() {
     if (!state) return undefined;
     return state.sessions.find((session) => session.id === selectedID) ?? state.selected ?? state.sessions[0];
   }, [selectedID, state]);
-  const canSend = Boolean(selected?.terminalAttached);
+  const canSend = Boolean(selected?.terminalAttached && selected.status !== 'busy');
 
   async function handleSelect(session: Session) {
     setSelectedID(session.id);
@@ -189,6 +190,9 @@ export function App() {
             <button type="button" className="icon-button" title={selected.externalAttach} onClick={() => void handleOpenTerminal()}>
               <MonitorUp size={18} />
             </button>
+            <button type="button" className="icon-button" title="Mostrar terminal" onClick={() => setTerminalOpen((open) => !open)}>
+              <TerminalSquare size={18} />
+            </button>
           </header>
 
           <div className="messages">
@@ -209,6 +213,18 @@ export function App() {
               </article>
             ))}
           </div>
+
+          {terminalOpen ? (
+            <section className="terminal-panel">
+              <header>
+                <strong>Terminal</strong>
+                <button type="button" onClick={() => setTerminalOpen(false)}>
+                  Ocultar
+                </button>
+              </header>
+              <pre>{selected.terminalOutput || 'Sem saida de terminal ainda.'}</pre>
+            </section>
+          ) : null}
 
           <form className="composer" onSubmit={handleSubmit}>
             <span className="terminal-indicator" title={selected.externalAttach}>

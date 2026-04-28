@@ -27,6 +27,7 @@ export interface Session {
   id: string;
   title: string;
   providerId: ProviderId;
+  providerSessionId: string;
   providerTag: string;
   providerAccent: string;
   status: SessionStatus;
@@ -39,6 +40,7 @@ export interface Session {
   createdAt: string;
   updatedAt: string;
   messages: Message[];
+  terminalOutput: string;
   pendingQuestion?: string;
   terminalAttached: boolean;
 }

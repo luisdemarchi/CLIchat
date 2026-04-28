@@ -21,6 +21,12 @@ App desktop pessoal para conversar com agentes locais de IA em um modelo parecid
 
 Neste Mac, Go foi instalado via Homebrew e Wails ficou em `/Users/luis/go/bin/wails`.
 
+Antes de usar o app, rode o host de terminais em um terminal normal:
+
+```bash
+agent-host serve
+```
+
 ```bash
 cd /Users/luis/projetos/pessoal/agent-chat-local
 pnpm --dir frontend install
@@ -39,7 +45,7 @@ Para conferir o terminal que esta por tras de uma conversa:
 agentctl attach <session-id>
 ```
 
-O app escuta em `127.0.0.1:47656`. O terminal externo nao cria outro LLM; ele anexa no mesmo PTY que o app abriu.
+O `agent-host` escuta em `127.0.0.1:47657` para o app e em `127.0.0.1:47656` para anexos de terminal. O terminal externo nao cria outro LLM; ele anexa no mesmo PTY que o `agent-host` abriu.
 
 ## Reuso do `claude-voice`
 

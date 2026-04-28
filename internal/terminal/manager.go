@@ -36,6 +36,13 @@ func (m *Manager) Start(options StartOptions) (*Process, error) {
 		return nil, errors.New("command is required")
 	}
 
+	m.mu.RLock()
+	existing := m.processes[options.SessionID]
+	m.mu.RUnlock()
+	if existing != nil {
+		return nil, errors.New("terminal process already exists")
+	}
+
 	process, err := startProcess(options)
 	if err != nil {
 		return nil, err
