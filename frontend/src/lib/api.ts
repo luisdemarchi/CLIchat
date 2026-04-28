@@ -25,6 +25,7 @@ const fallback: Bootstrap = {
       id: 'claude',
       name: 'Claude',
       cli: 'claude',
+      command: 'claude',
       tag: 'CLAUDE',
       accent: '#6f5adc',
       available: true,
@@ -34,6 +35,7 @@ const fallback: Bootstrap = {
       id: 'gemini',
       name: 'Gemini',
       cli: 'gemini',
+      command: 'gemini',
       tag: 'GEMINI',
       accent: '#167c80',
       available: true,
@@ -43,45 +45,22 @@ const fallback: Bootstrap = {
       id: 'codex',
       name: 'Codex',
       cli: 'codex',
+      command: 'codex',
       tag: 'CODEX',
       accent: '#a45f18',
       available: true,
       description: 'Codex CLI em uma sessao local controlada pelo app.',
     },
   ],
-  sessions: [
-    {
-      id: 'demo-claude',
-      title: 'Claude local',
-      providerId: 'claude',
-      providerTag: 'CLAUDE',
-      providerAccent: '#6f5adc',
-      status: 'idle',
-      avatarLabel: 'CL',
-      lastMessage: 'Sessao pronta para conectar ao CLI claude.',
-      externalAttach: 'agentctl attach demo-claude',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      terminalAttached: false,
-      messages: [
-        {
-          id: 'demo-message',
-          role: 'system',
-          text: 'Preview web. No app desktop, estes dados vem do backend Go.',
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    },
-  ],
+  sessions: [],
   selected: undefined,
   mirror: {
     enabled: false,
     mode: 'preview',
     address: '',
-    note: 'Preview web sem backend Wails.',
+    note: 'Backend Wails indisponivel neste preview.',
   },
 };
-fallback.selected = fallback.sessions[0];
 
 function bridge() {
   return window.go?.app?.App;
@@ -104,26 +83,7 @@ export async function createChat(input: { providerId: ProviderId; title: string;
   if (api?.CreateChat) {
     return api.CreateChat(input);
   }
-  const provider = fallback.providers.find((item) => item.id === input.providerId) ?? fallback.providers[0];
-  const session: Session = {
-    id: `preview-${Date.now()}`,
-    title: input.title || `Novo chat ${provider.name}`,
-    providerId: provider.id,
-    providerTag: provider.tag,
-    providerAccent: provider.accent,
-    status: 'idle',
-    cwd: input.cwd,
-    avatarLabel: provider.name.slice(0, 2).toUpperCase(),
-    lastMessage: 'Chat criado no preview.',
-    externalAttach: 'agentctl attach preview',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    terminalAttached: false,
-    messages: [],
-  };
-  fallback.sessions = [session, ...fallback.sessions];
-  fallback.selected = session;
-  return session;
+  throw new Error('Backend Wails indisponivel. Abra pelo app desktop para iniciar CLIs reais.');
 }
 
 export async function sendMessage(input: { sessionId: string; text: string }): Promise<Session> {
@@ -131,15 +91,7 @@ export async function sendMessage(input: { sessionId: string; text: string }): P
   if (api?.SendMessage) {
     return api.SendMessage(input);
   }
-  const session = fallback.sessions.find((item) => item.id === input.sessionId) ?? fallback.sessions[0];
-  session.messages = [
-    ...session.messages,
-    { id: `user-${Date.now()}`, role: 'user', text: input.text, createdAt: new Date().toISOString() },
-  ];
-  session.lastMessage = input.text;
-  session.updatedAt = new Date().toISOString();
-  fallback.selected = session;
-  return session;
+  throw new Error('Backend Wails indisponivel. Abra pelo app desktop para enviar mensagens.');
 }
 
 export function onStateUpdate(callback: (payload: Bootstrap) => void): () => void {

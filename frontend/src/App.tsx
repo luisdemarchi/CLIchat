@@ -21,6 +21,7 @@ export function App() {
   const [selectedID, setSelectedID] = useState('');
   const [draft, setDraft] = useState('');
   const [newProvider, setNewProvider] = useState<ProviderId>('claude');
+  const [error, setError] = useState('');
 
   useEffect(() => {
     getBootstrap().then((payload) => {
@@ -46,20 +47,25 @@ export function App() {
 
   async function handleNewChat() {
     if (!state) return;
+    setError('');
     const provider = state.providers.find((item) => item.id === newProvider) ?? state.providers[0];
-    const created = await createChat({
-      providerId: provider.id,
-      title: `${provider.name} ${state.sessions.length + 1}`,
-      cwd: '',
-    });
-    setSelectedID(created.id);
-    setState((current) =>
-      current && {
-        ...current,
-        sessions: [created, ...current.sessions],
-        selected: created,
-      },
-    );
+    try {
+      const created = await createChat({
+        providerId: provider.id,
+        title: `${provider.name} ${state.sessions.length + 1}`,
+        cwd: '',
+      });
+      setSelectedID(created.id);
+      setState((current) =>
+        current && {
+          ...current,
+          sessions: [created, ...current.sessions.filter((session) => session.id !== created.id)],
+          selected: created,
+        },
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -68,18 +74,23 @@ export function App() {
 
     const text = draft.trim();
     setDraft('');
-    const updated = await sendMessage({ sessionId: selected.id, text });
-    setState((current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        sessions: current.sessions.map((session) => (session.id === updated.id ? updated : session)),
-        selected: updated,
-      };
-    });
+    setError('');
+    try {
+      const updated = await sendMessage({ sessionId: selected.id, text });
+      setState((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          sessions: current.sessions.map((session) => (session.id === updated.id ? updated : session)),
+          selected: updated,
+        };
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }
 
-  if (!state || !selected) {
+  if (!state) {
     return <main className="shell loading">Carregando</main>;
   }
 
@@ -109,6 +120,7 @@ export function App() {
             <Plus size={18} />
           </button>
         </section>
+        {error ? <div className="error-banner">{error}</div> : null}
 
         <section className="status-strip" aria-label="Status">
           {state.providers.map((provider) => (
@@ -122,7 +134,7 @@ export function App() {
         <nav className="chat-list" aria-label="Conversas">
           {state.sessions.map((session) => (
             <button
-              className={`chat-row ${session.id === selected.id ? 'active' : ''}`}
+              className={`chat-row ${session.id === selected?.id ? 'active' : ''}`}
               key={session.id}
               type="button"
               onClick={() => void handleSelect(session)}
@@ -140,49 +152,60 @@ export function App() {
         </nav>
       </aside>
 
-      <section className="conversation">
-        <header className="conversation-header">
-          <div className="avatar large" style={{ background: selected.providerAccent }}>
-            {selected.avatarLabel}
-          </div>
-          <div className="title-block">
-            <strong>{selected.title}</strong>
-            <span>
-              {statusLabel(selected.status)}
-              {selected.currentTool ? ` - ${selected.currentTool}` : ''}
+      {selected ? (
+        <section className="conversation">
+          <header className="conversation-header">
+            <div className="avatar large" style={{ background: selected.providerAccent }}>
+              {selected.avatarLabel}
+            </div>
+            <div className="title-block">
+              <strong>{selected.title}</strong>
+              <span>
+                {statusLabel(selected.status)}
+                {selected.processId ? ` - pid ${selected.processId}` : ''}
+                {selected.currentTool ? ` - ${selected.currentTool}` : ''}
+              </span>
+            </div>
+            <span className="provider-tag" style={{ borderColor: selected.providerAccent, color: selected.providerAccent }}>
+              {selected.providerTag}
             </span>
+            <button type="button" className="icon-button" title={selected.externalAttach}>
+              <MonitorUp size={18} />
+            </button>
+          </header>
+
+          <div className="messages">
+            {selected.messages.map((message) => (
+              <article className={`bubble ${message.role}`} key={message.id}>
+                <p>{message.text}</p>
+                <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+              </article>
+            ))}
           </div>
-          <span className="provider-tag" style={{ borderColor: selected.providerAccent, color: selected.providerAccent }}>
-            {selected.providerTag}
-          </span>
-          <button type="button" className="icon-button" title={selected.externalAttach}>
-            <MonitorUp size={18} />
-          </button>
-        </header>
 
-        <div className="messages">
-          {selected.messages.map((message) => (
-            <article className={`bubble ${message.role}`} key={message.id}>
-              <p>{message.text}</p>
-              <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
-            </article>
-          ))}
-        </div>
-
-        <form className="composer" onSubmit={handleSubmit}>
-          <span className="terminal-indicator" title={selected.externalAttach}>
-            <TerminalSquare size={18} />
-          </span>
-          <input
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder={`Mensagem para ${selected.providerTag}`}
-          />
-          <button type="submit" title="Enviar">
-            <Send size={18} />
-          </button>
-        </form>
-      </section>
+          <form className="composer" onSubmit={handleSubmit}>
+            <span className="terminal-indicator" title={selected.externalAttach}>
+              <TerminalSquare size={18} />
+            </span>
+            <input
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              placeholder={`Mensagem para ${selected.providerTag}`}
+            />
+            <button type="submit" title="Enviar">
+              <Send size={18} />
+            </button>
+          </form>
+        </section>
+      ) : (
+        <section className="empty-conversation">
+          <div>
+            <TerminalSquare size={34} />
+            <strong>Escolha um provedor e inicie um chat.</strong>
+            <span>O app vai abrir o CLI real em um terminal oculto e mostrar a saida aqui.</span>
+          </div>
+        </section>
+      )}
     </main>
   );
 }

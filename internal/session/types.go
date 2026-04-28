@@ -37,6 +37,7 @@ type Session struct {
 	AvatarLabel      string      `json:"avatarLabel"`
 	LastMessage      string      `json:"lastMessage"`
 	CurrentTool      string      `json:"currentTool,omitempty"`
+	ProcessID        int         `json:"processId,omitempty"`
 	ExternalAttach   string      `json:"externalAttach"`
 	CreatedAt        string      `json:"createdAt"`
 	UpdatedAt        string      `json:"updatedAt"`

@@ -6,6 +6,7 @@ export interface Provider {
   id: ProviderId;
   name: string;
   cli: string;
+  command: string;
   tag: string;
   accent: string;
   available: boolean;
@@ -30,6 +31,7 @@ export interface Session {
   avatarLabel: string;
   lastMessage: string;
   currentTool?: string;
+  processId?: number;
   externalAttach: string;
   createdAt: string;
   updatedAt: string;

@@ -112,6 +112,17 @@ select {
   border-bottom: 1px solid #dfe2da;
 }
 
+.error-banner {
+  margin: 12px 16px 0;
+  border: 1px solid #e5b5b5;
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: #7a1d1d;
+  background: #fff0f0;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .new-chat select {
   min-width: 0;
   height: 38px;
@@ -228,6 +239,32 @@ select {
   background:
     linear-gradient(rgba(248, 248, 244, 0.9), rgba(248, 248, 244, 0.9)),
     repeating-linear-gradient(45deg, #dfe4dc 0, #dfe4dc 1px, transparent 1px, transparent 18px);
+}
+
+.empty-conversation {
+  display: grid;
+  min-width: 0;
+  place-items: center;
+  padding: 24px;
+  background: #f8f8f4;
+}
+
+.empty-conversation div {
+  display: grid;
+  max-width: 420px;
+  gap: 10px;
+  justify-items: center;
+  color: #596158;
+  text-align: center;
+}
+
+.empty-conversation strong {
+  color: #222820;
+  font-size: 18px;
+}
+
+.empty-conversation span {
+  line-height: 1.4;
 }
 
 .conversation-header {

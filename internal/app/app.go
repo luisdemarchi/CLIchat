@@ -4,19 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"agent-chat-local/internal/mirror"
 	"agent-chat-local/internal/provider"
 	"agent-chat-local/internal/session"
+	"agent-chat-local/internal/terminal"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+var ansiPattern = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\a]*(?:\a|\x1b\\))`)
 
 type App struct {
 	ctx       context.Context
 	registry  *session.Registry
 	providers []provider.Provider
 	mirror    *mirror.Server
+	terminals *terminal.Manager
 }
 
 type Bootstrap struct {
@@ -29,12 +34,12 @@ type Bootstrap struct {
 func New() *App {
 	providers := provider.Defaults()
 	registry := session.NewRegistry()
-	registry.Seed(providers)
 
 	return &App{
 		registry:  registry,
 		providers: providers,
 		mirror:    mirror.NewServer(),
+		terminals: terminal.NewManager(),
 	}
 }
 
@@ -69,7 +74,27 @@ func (a *App) CreateChat(input session.CreateInput) (session.Session, error) {
 	if !ok {
 		return session.Session{}, fmt.Errorf("unknown provider: %s", input.ProviderID)
 	}
+	if !item.Available {
+		return session.Session{}, fmt.Errorf("%s CLI not found", item.Name)
+	}
+
 	created := a.registry.Create(input, item)
+	process, err := a.terminals.Start(terminal.StartOptions{
+		SessionID: created.ID,
+		Command:   item.Command,
+		CWD:       created.CWD,
+		OnOutput:  a.handleTerminalOutput,
+		OnExit:    a.handleTerminalExit,
+	})
+	if err != nil {
+		_, _ = a.registry.SetStatus(created.ID, session.Offline, "")
+		updated, _ := a.registry.AppendSystem(created.ID, "Falha ao iniciar "+item.CLI+": "+err.Error())
+		a.emitState()
+		return updated, err
+	}
+
+	created, _ = a.registry.SetTerminal(created.ID, true, process.PID())
+	created, _ = a.registry.AppendSystem(created.ID, fmt.Sprintf("Processo iniciado: %s (pid %d).", item.Command, process.PID()))
 	a.emitState()
 	return created, nil
 }
@@ -83,20 +108,17 @@ func (a *App) SendMessage(input session.SendInput) (session.Session, error) {
 	if _, err := a.registry.AppendUser(input.SessionID, text); err != nil {
 		return session.Session{}, err
 	}
-	if _, err := a.registry.SetStatus(input.SessionID, session.Busy, "queued"); err != nil {
+	if _, err := a.registry.SetStatus(input.SessionID, session.Busy, "terminal"); err != nil {
 		return session.Session{}, err
+	}
+	if err := a.terminals.SendLine(input.SessionID, text); err != nil {
+		_, _ = a.registry.SetStatus(input.SessionID, session.Offline, "")
+		updated, _ := a.registry.AppendSystem(input.SessionID, "Nao foi possivel enviar para o terminal: "+err.Error())
+		a.emitState()
+		return updated, err
 	}
 
-	reply := "Mensagem registrada. A proxima etapa e conectar este chat ao PTY do CLI para executar a conversa real."
-	updated, err := a.registry.AppendAssistant(input.SessionID, reply)
-	if err != nil {
-		return session.Session{}, err
-	}
-	updated, err = a.registry.SetStatus(input.SessionID, session.Idle, "")
-	if err != nil {
-		return session.Session{}, err
-	}
-
+	updated, _ := a.registry.Get(input.SessionID)
 	a.emitState()
 	return updated, nil
 }
@@ -120,6 +142,39 @@ func (a *App) providerByID(id provider.ID) (provider.Provider, bool) {
 		}
 	}
 	return provider.Provider{}, false
+}
+
+func (a *App) handleTerminalOutput(sessionID string, raw string) {
+	text := cleanTerminalText(raw)
+	if text == "" {
+		return
+	}
+	if len(text) > 4000 {
+		text = text[:4000] + "\n[saida truncada]"
+	}
+	_, _ = a.registry.AppendAssistant(sessionID, text)
+	_, _ = a.registry.SetStatus(sessionID, session.Idle, "")
+	a.emitState()
+}
+
+func (a *App) handleTerminalExit(sessionID string, err error) {
+	a.terminals.Forget(sessionID)
+	_, _ = a.registry.SetTerminal(sessionID, false, 0)
+	status := "Processo encerrado."
+	if err != nil {
+		status = "Processo encerrado: " + err.Error()
+	}
+	_, _ = a.registry.AppendSystem(sessionID, status)
+	_, _ = a.registry.SetStatus(sessionID, session.Offline, "")
+	a.emitState()
+}
+
+func cleanTerminalText(raw string) string {
+	cleaned := ansiPattern.ReplaceAllString(raw, "")
+	cleaned = strings.ReplaceAll(cleaned, "\r\n", "\n")
+	cleaned = strings.ReplaceAll(cleaned, "\r", "\n")
+	cleaned = strings.TrimSpace(cleaned)
+	return cleaned
 }
 
 func (a *App) bootstrap() Bootstrap {

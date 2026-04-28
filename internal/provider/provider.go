@@ -1,6 +1,10 @@
 package provider
 
-import "os/exec"
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+)
 
 type ID string
 
@@ -14,6 +18,7 @@ type Provider struct {
 	ID          ID     `json:"id"`
 	Name        string `json:"name"`
 	CLI         string `json:"cli"`
+	Command     string `json:"command"`
 	Tag         string `json:"tag"`
 	Accent      string `json:"accent"`
 	Available   bool   `json:"available"`
@@ -49,11 +54,36 @@ func Defaults() []Provider {
 	}
 
 	for index := range providers {
-		_, err := exec.LookPath(providers[index].CLI)
-		providers[index].Available = err == nil
+		command, ok := findCommand(providers[index].CLI)
+		providers[index].Command = command
+		providers[index].Available = ok
 	}
 
 	return providers
+}
+
+func findCommand(name string) (string, bool) {
+	if path, err := exec.LookPath(name); err == nil {
+		return path, true
+	}
+
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", name),
+		filepath.Join(home, "bin", name),
+		"/opt/homebrew/bin/" + name,
+		"/usr/local/bin/" + name,
+		"/usr/bin/" + name,
+		"/bin/" + name,
+	}
+
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
+			return candidate, true
+		}
+	}
+
+	return name, false
 }
 
 func ByID(id ID) (Provider, bool) {

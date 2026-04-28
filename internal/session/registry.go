@@ -160,6 +160,20 @@ func (r *Registry) SetStatus(sessionID string, status Status, tool string) (Sess
 	return clone(*session), nil
 }
 
+func (r *Registry) SetTerminal(sessionID string, attached bool, processID int) (Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	session, ok := r.sessions[sessionID]
+	if !ok {
+		return Session{}, errors.New("session not found")
+	}
+	session.TerminalAttached = attached
+	session.ProcessID = processID
+	session.UpdatedAt = timestamp()
+	return clone(*session), nil
+}
+
 func (r *Registry) appendMessage(sessionID string, message Message) (Session, error) {
 	if message.Text == "" {
 		return Session{}, errors.New("message cannot be empty")
