@@ -192,7 +192,7 @@ export function App() {
     setError('');
     try {
       const command = await openTerminal({ sessionId: selected.id });
-      setError(`Comando copiado: ${command}`);
+      setError(`Terminal externo aberto. Comando copiado: ${command}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -296,7 +296,7 @@ export function App() {
             <span className="provider-tag" style={{ borderColor: selected.providerAccent, color: selected.providerAccent }}>
               {selected.providerTag}
             </span>
-            <button type="button" className="icon-button" title={selected.externalAttach} onClick={() => void handleOpenTerminal()}>
+            <button type="button" className="icon-button" title="Abrir terminal externo" onClick={() => void handleOpenTerminal()}>
               <MonitorUp size={18} />
             </button>
             <button type="button" className="icon-button" title="Mostrar terminal" onClick={() => setTerminalOpen((open) => !open)}>

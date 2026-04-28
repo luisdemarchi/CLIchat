@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +23,9 @@ import (
 
 var ansiPattern = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\a]*(?:\a|\x1b\\))`)
 var controlPattern = regexp.MustCompile(`[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]`)
+var datePattern = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}\b\.?`)
+var trailingTUIStatusPattern = regexp.MustCompile(`(?i)\s*(creating|processing|thinking|worked for \d+s|baked for \d+s|running .*hooks).*$`)
+var trailingDecorPattern = regexp.MustCompile(`(?:\s*[✢✣✤✥✦✧✶✷✸✹✺✻✼✽✾✿*+·•]\s*|\s+\d+\s*)+$`)
 
 type App struct {
 	ctx       context.Context
@@ -133,6 +140,7 @@ func (a *App) OpenTerminal(input TerminalInput) (string, error) {
 		return "", errors.New("terminal command not available")
 	}
 	wailsruntime.ClipboardSetText(a.ctx, item.ExternalAttach)
+	_ = openExternalTerminal(item.ExternalAttach)
 	return item.ExternalAttach, nil
 }
 
@@ -545,11 +553,41 @@ func filterAssistantText(raw string, lastInput string) string {
 
 func normalizeAssistantLine(line string) string {
 	line = strings.TrimSpace(line)
-	line = strings.TrimLeft(line, "●◦•>›❯$ ")
+	if strings.Contains(strings.ToLower(line), "tip: run claude") || strings.Contains(strings.ToLower(line), "claude--continue") {
+		if date := datePattern.FindString(line); date != "" {
+			return strings.TrimSpace(date)
+		}
+		return ""
+	}
+
+	chunks := strings.FieldsFunc(line, func(r rune) bool {
+		return r == '●' || r == '◉' || r == '◆' || r == '❯'
+	})
+	for i := len(chunks) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(chunks[i])
+		if candidate != "" && hasLetterOrNumber(candidate) {
+			line = candidate
+			break
+		}
+	}
+
+	line = trailingTUIStatusPattern.ReplaceAllString(line, "")
+	line = strings.TrimLeft(line, "●◦•>›❯$✢✣✤✥✦✧✶✷✸✹✺✻✼✽✾✿*+· ")
 	line = strings.ReplaceAll(line, "cavemanmode", "caveman mode")
 	line = strings.ReplaceAll(line, "Cavemanmode", "Caveman mode")
+	line = strings.ReplaceAll(line, "Que tarefa?", "Que tarefa?")
+	line = trailingDecorPattern.ReplaceAllString(line, "")
 	line = strings.TrimSpace(line)
 	return line
+}
+
+func hasLetterOrNumber(line string) bool {
+	for _, r := range line {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldDropTerminalLine(line string, lastInput string) bool {
@@ -607,8 +645,14 @@ func shouldDropTerminalLine(line string, lastInput string) bool {
 		"effort",
 		"processing",
 		"processando",
+		"creating",
 		"running sp hooks",
 		"sp hooks",
+		"worked for",
+		"tip: run claude",
+		"resume to resume",
+		"continuetoresume",
+		"continueorclaude",
 	}
 	lower := strings.ToLower(line)
 	for _, drop := range drops {
@@ -617,6 +661,65 @@ func shouldDropTerminalLine(line string, lastInput string) bool {
 		}
 	}
 	return false
+}
+
+func openExternalTerminal(command string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return openMacTerminal(command)
+	case "linux":
+		if path, err := exec.LookPath("x-terminal-emulator"); err == nil {
+			return exec.Command(path, "-e", command).Start()
+		}
+		for _, name := range []string{"gnome-terminal", "konsole", "xfce4-terminal", "xterm"} {
+			if path, err := exec.LookPath(name); err == nil {
+				return exec.Command(path, "-e", command).Start()
+			}
+		}
+		return errors.New("nenhum terminal grafico encontrado")
+	case "windows":
+		return exec.Command("cmd", "/c", "start", "cmd", "/k", command).Start()
+	default:
+		return errors.New("abrir terminal externo nao suportado neste sistema")
+	}
+}
+
+func openMacTerminal(command string) error {
+	agentctl := "agentctl"
+	if path, err := exec.LookPath("agentctl"); err == nil {
+		agentctl = path
+	} else if home, err := os.UserHomeDir(); err == nil {
+		candidate := filepath.Join(home, ".local", "bin", "agentctl")
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			agentctl = candidate
+		}
+	}
+	parts := strings.Fields(command)
+	if len(parts) >= 3 && parts[0] == "agentctl" && parts[1] == "attach" {
+		command = shellQuote(agentctl) + " attach " + shellQuote(parts[2])
+	}
+
+	file, err := os.CreateTemp("", "agent-chat-*.command")
+	if err != nil {
+		return err
+	}
+	path := file.Name()
+	content := "#!/bin/zsh\nclear\n" + command + "\n"
+	if _, err := file.WriteString(content); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0700); err != nil {
+		return err
+	}
+	return exec.Command("open", path).Start()
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func (a *App) bootstrap() Bootstrap {

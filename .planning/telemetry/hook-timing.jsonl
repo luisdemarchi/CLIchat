@@ -63,3 +63,11 @@
 {"schema":1,"hook":"quality-gate","event":"counter","metric":"count","timestamp":"2026-04-28T20:39:36.070Z"}
 {"schema":1,"hook":"session-end","event":"counter","metric":"count","timestamp":"2026-04-28T20:45:41.009Z"}
 {"schema":1,"hook":"session-end","event":"session-end","duration_ms":0,"timestamp":"2026-04-28T20:45:41.010Z","session_id":"2851e8e4-42bc-40c1-b8b4-07963778aec6"}
+{"schema":1,"hook":"intake-scanner","event":"counter","metric":"count","timestamp":"2026-04-28T20:46:52.561Z"}
+{"schema":1,"hook":"quality-gate","event":"counter","metric":"count","timestamp":"2026-04-28T20:47:06.999Z"}
+{"schema":1,"hook":"quality-gate","event":"counter","metric":"count","timestamp":"2026-04-28T20:47:30.391Z"}
+{"schema":1,"hook":"session-end","event":"counter","metric":"count","timestamp":"2026-04-28T20:50:46.155Z"}
+{"schema":1,"hook":"session-end","event":"session-end","duration_ms":0,"timestamp":"2026-04-28T20:50:46.159Z","session_id":"8058c539-ec36-4f00-a9c3-873315757a7f"}
+{"schema":1,"hook":"intake-scanner","event":"counter","metric":"count","timestamp":"2026-04-28T20:51:08.355Z"}
+{"schema":1,"hook":"quality-gate","event":"counter","metric":"count","timestamp":"2026-04-28T20:51:15.413Z"}
+{"schema":1,"hook":"quality-gate","event":"counter","metric":"count","timestamp":"2026-04-28T20:51:25.133Z"}
