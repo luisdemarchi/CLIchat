@@ -77,3 +77,9 @@
 {"schema":1,"hook":"subagent-stop","event":"subagent-stop","duration_ms":0,"timestamp":"2026-04-28T20:55:32.657Z","agent_id":"a12a25dfbb018fd58","agent_type":null,"status":"unknown","output_tokens":null}
 {"schema":1,"hook":"session-end","event":"counter","metric":"count","timestamp":"2026-04-28T20:59:57.683Z"}
 {"schema":1,"hook":"session-end","event":"session-end","duration_ms":0,"timestamp":"2026-04-28T20:59:57.685Z","session_id":"18f439a9-df09-492c-b365-85f216da7cc5"}
+{"schema":1,"hook":"intake-scanner","event":"counter","metric":"count","timestamp":"2026-04-28T21:01:02.210Z"}
+{"schema":1,"hook":"intake-scanner","event":"counter","metric":"count","timestamp":"2026-04-28T21:01:16.810Z"}
+{"schema":1,"hook":"intake-scanner","event":"counter","metric":"count","timestamp":"2026-04-28T21:49:03.050Z"}
+{"schema":1,"hook":"quality-gate","event":"counter","metric":"count","timestamp":"2026-04-28T21:49:20.981Z"}
+{"schema":1,"hook":"quality-gate","event":"counter","metric":"count","timestamp":"2026-04-28T21:49:32.908Z"}
+{"schema":1,"hook":"quality-gate","event":"counter","metric":"count","timestamp":"2026-04-28T21:50:34.486Z"}
