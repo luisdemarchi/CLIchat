@@ -176,7 +176,7 @@ export function App() {
           </header>
 
           <div className="messages">
-            {selected.messages.map((message) => (
+            {(selected.messages ?? []).map((message) => (
               <article className={`bubble ${message.role}`} key={message.id}>
                 <p>{message.text}</p>
                 <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>

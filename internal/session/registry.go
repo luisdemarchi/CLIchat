@@ -213,6 +213,9 @@ func (r *Registry) appendMessage(sessionID string, message Message) (Session, er
 
 func clone(input Session) Session {
 	input.Messages = append([]Message(nil), input.Messages...)
+	if input.Messages == nil {
+		input.Messages = []Message{}
+	}
 	return input
 }
 
