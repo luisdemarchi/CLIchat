@@ -1,6 +1,6 @@
 import { Check, Circle, MonitorUp, Network, Plus, Send, TerminalSquare } from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { createChat, getBootstrap, onStateUpdate, openTerminal, selectSession, sendMessage } from './lib/api';
+import { createChat, getBootstrap, onStateUpdate, openTerminal, respondToPrompt, selectSession, sendMessage } from './lib/api';
 import type { Bootstrap, ProviderId, Session } from './types';
 
 function statusLabel(status: Session['status']) {
@@ -102,6 +102,24 @@ export function App() {
     try {
       const command = await openTerminal({ sessionId: selected.id });
       setError(`Comando copiado: ${command}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handlePromptAction(action: { id: string; input: string }) {
+    if (!selected) return;
+    setError('');
+    try {
+      const updated = await respondToPrompt({ sessionId: selected.id, actionId: action.id, input: action.input });
+      setState((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          sessions: current.sessions.map((session) => (session.id === updated.id ? updated : session)),
+          selected: updated,
+        };
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -212,6 +230,18 @@ export function App() {
                 <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
               </article>
             ))}
+            {(selected.pendingActions ?? []).length > 0 ? (
+              <article className="prompt-card">
+                <p>{selected.pendingQuestion || 'O terminal esta aguardando confirmacao.'}</p>
+                <div>
+                  {(selected.pendingActions ?? []).map((action) => (
+                    <button type="button" key={action.id} onClick={() => void handlePromptAction(action)}>
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+              </article>
+            ) : null}
           </div>
 
           {terminalOpen ? (
@@ -222,7 +252,7 @@ export function App() {
                   Ocultar
                 </button>
               </header>
-              <pre>{selected.terminalOutput || 'Sem saida de terminal ainda.'}</pre>
+              <pre>{selected.terminalView || 'Sem saida de terminal ainda.'}</pre>
             </section>
           ) : null}
 

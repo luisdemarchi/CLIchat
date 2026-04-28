@@ -365,6 +365,41 @@ select {
   background: #ffffff;
 }
 
+.prompt-card {
+  display: grid;
+  max-width: min(560px, 84%);
+  gap: 10px;
+  align-self: flex-start;
+  border: 1px solid #dfc170;
+  border-radius: 8px;
+  padding: 11px;
+  background: #fff8df;
+  box-shadow: 0 1px 2px rgba(34, 37, 31, 0.08);
+}
+
+.prompt-card p {
+  margin: 0;
+  color: #3b3525;
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.prompt-card div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.prompt-card button {
+  border: 1px solid #c49a31;
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: #2d2615;
+  background: #ffffff;
+  font-weight: 700;
+}
+
 .composer {
   grid-row: 4;
   padding: 12px 18px;

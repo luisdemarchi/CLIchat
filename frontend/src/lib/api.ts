@@ -9,6 +9,7 @@ declare global {
           SelectSession: (id: string) => Promise<Session>;
           CreateChat: (input: { providerId: ProviderId; title: string; cwd: string }) => Promise<Session>;
           SendMessage: (input: { sessionId: string; text: string }) => Promise<Session>;
+          RespondToPrompt: (input: { sessionId: string; actionId: string; input: string }) => Promise<Session>;
           OpenTerminal: (input: { sessionId: string }) => Promise<string>;
           ExternalAttachCommand: (sessionId: string) => Promise<string>;
         };
@@ -96,6 +97,14 @@ export async function sendMessage(input: { sessionId: string; text: string }): P
     return api.SendMessage(input);
   }
   throw new Error('Backend Wails indisponivel. Abra pelo app desktop para enviar mensagens.');
+}
+
+export async function respondToPrompt(input: { sessionId: string; actionId: string; input: string }): Promise<Session> {
+  const api = bridge();
+  if (api?.RespondToPrompt) {
+    return api.RespondToPrompt(input);
+  }
+  throw new Error('Backend Wails indisponivel. Abra pelo app desktop para responder ao terminal.');
 }
 
 export async function openTerminal(input: { sessionId: string }): Promise<string> {

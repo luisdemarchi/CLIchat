@@ -49,3 +49,13 @@
 {"schema":1,"hook":"intake-scanner","event":"counter","metric":"count","timestamp":"2026-04-28T20:33:20.480Z"}
 {"schema":1,"hook":"quality-gate","event":"counter","metric":"count","timestamp":"2026-04-28T20:33:30.684Z"}
 {"schema":1,"hook":"quality-gate","event":"counter","metric":"violations","timestamp":"2026-04-28T20:33:30.716Z"}
+{"schema":1,"hook":"intake-scanner","event":"counter","metric":"count","timestamp":"2026-04-28T20:34:29.141Z"}
+{"schema":1,"hook":"quality-gate","event":"counter","metric":"count","timestamp":"2026-04-28T20:34:41.069Z"}
+{"schema":1,"hook":"intake-scanner","event":"counter","metric":"count","timestamp":"2026-04-28T20:37:40.905Z"}
+{"schema":1,"hook":"session-end","event":"counter","metric":"count","timestamp":"2026-04-28T20:37:46.581Z"}
+{"schema":1,"hook":"session-end","event":"session-end","duration_ms":0,"timestamp":"2026-04-28T20:37:46.586Z","session_id":"fbe34139-446e-4c6b-8fb5-5f23b63cd0cd"}
+{"schema":1,"hook":"session-end","event":"counter","metric":"count","timestamp":"2026-04-28T20:37:46.601Z"}
+{"schema":1,"hook":"session-end","event":"session-end","duration_ms":0,"timestamp":"2026-04-28T20:37:46.605Z","session_id":"7cbc8bc8-93ad-4e2a-b12e-ea668d9edefa"}
+{"schema":1,"hook":"session-end","event":"counter","metric":"count","timestamp":"2026-04-28T20:37:46.624Z"}
+{"schema":1,"hook":"session-end","event":"session-end","duration_ms":0,"timestamp":"2026-04-28T20:37:46.670Z","session_id":"1508bcb7-70c5-43d6-ab5b-9cfe59b4365d"}
+{"schema":1,"hook":"intake-scanner","event":"counter","metric":"count","timestamp":"2026-04-28T20:38:04.479Z"}

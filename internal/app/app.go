@@ -32,6 +32,12 @@ type TerminalInput struct {
 	SessionID string `json:"sessionId"`
 }
 
+type TerminalActionInput struct {
+	SessionID string `json:"sessionId"`
+	ActionID  string `json:"actionId"`
+	Input     string `json:"input"`
+}
+
 type Bootstrap struct {
 	Providers []provider.Provider `json:"providers"`
 	Sessions  []session.Session   `json:"sessions"`
@@ -125,6 +131,39 @@ func (a *App) OpenTerminal(input TerminalInput) (string, error) {
 	return item.ExternalAttach, nil
 }
 
+func (a *App) RespondToPrompt(input TerminalActionInput) (session.Session, error) {
+	current, ok := a.registry.Get(input.SessionID)
+	if !ok {
+		return session.Session{}, errors.New("session not found")
+	}
+	if len(current.PendingActions) == 0 {
+		return current, errors.New("nenhuma acao pendente")
+	}
+
+	found := false
+	value := input.Input
+	for _, action := range current.PendingActions {
+		if action.ID == input.ActionID {
+			value = action.Input
+			found = true
+			break
+		}
+	}
+	if !found {
+		return current, errors.New("acao pendente nao encontrada")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.host.Send(ctx, input.SessionID, value); err != nil {
+		return current, err
+	}
+	updated, _ := a.registry.ClearPendingPrompt(input.SessionID)
+	_, _ = a.registry.SetStatus(input.SessionID, session.Idle, "")
+	a.emitState()
+	return updated, nil
+}
+
 func (a *App) SendMessage(input session.SendInput) (session.Session, error) {
 	text := strings.TrimSpace(input.Text)
 	if text == "" {
@@ -194,6 +233,13 @@ func (a *App) providerByID(id provider.ID) (provider.Provider, bool) {
 
 func (a *App) handleTerminalOutput(sessionID string, raw string) {
 	_, _ = a.registry.AppendTerminalOutput(sessionID, raw)
+	if view := terminalViewText(raw); view != "" {
+		_, _ = a.registry.AppendTerminalView(sessionID, view)
+		if question, actions, ok := detectPendingActions(view); ok {
+			_, _ = a.registry.SetPendingPrompt(sessionID, question, actions)
+			_, _ = a.registry.SetStatus(sessionID, session.Waiting, "permissao")
+		}
+	}
 	current, ok := a.registry.Get(sessionID)
 	if ok && current.Status == session.Busy {
 		a.outputs.add(sessionID, raw, func(text string) {
@@ -326,6 +372,77 @@ func cleanTerminalText(raw string) string {
 	return cleaned
 }
 
+func terminalViewText(raw string) string {
+	cleaned := cleanTerminalText(raw)
+	if cleaned == "" {
+		return ""
+	}
+	lines := strings.Split(cleaned, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || isCursorOnlyLine(line) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
+func isCursorOnlyLine(line string) bool {
+	trimmed := strings.Trim(line, " \t0123456789;[]ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+	return trimmed == ""
+}
+
+func detectPendingActions(text string) (string, []session.PendingAction, bool) {
+	lower := strings.ToLower(text)
+	patterns := []string{
+		"do you trust",
+		"permission",
+		"permissions",
+		"allow",
+		"accept",
+		"approve",
+		"proceed",
+		"continue?",
+		"press enter",
+		"workspace",
+	}
+	found := false
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", nil, false
+	}
+
+	question := lastMeaningfulLines(text, 4)
+	if question == "" {
+		question = "O terminal esta aguardando confirmacao."
+	}
+	return question, []session.PendingAction{
+		{ID: "accept", Label: "Aceitar", Input: ""},
+		{ID: "yes", Label: "Sim", Input: "y"},
+		{ID: "no", Label: "Nao", Input: "n"},
+	}, true
+}
+
+func lastMeaningfulLines(text string, limit int) string {
+	lines := strings.Split(cleanTerminalText(text), "\n")
+	kept := make([]string, 0, limit)
+	for i := len(lines) - 1; i >= 0 && len(kept) < limit; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || shouldDropTerminalLine(line, "") {
+			continue
+		}
+		kept = append([]string{line}, kept...)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
 type outputFilter struct {
 	mu      sync.Mutex
 	buffers map[string]string
@@ -382,9 +499,7 @@ func (f *outputFilter) flush(sessionID string, emit func(string)) {
 	f.mu.Unlock()
 
 	text := filterAssistantText(buffer, lastInput)
-	if text != "" {
-		emit(text)
-	}
+	emit(text)
 }
 
 func filterAssistantText(raw string, lastInput string) string {
@@ -426,26 +541,43 @@ func shouldDropTerminalLine(line string, lastInput string) bool {
 	if trimmed == "" {
 		return true
 	}
+	if strings.ContainsAny(line, "╭╮╰╯│─┌┐└┘├┤┬┴┼▗▖▘▝◉❯◆�") {
+		return true
+	}
 
 	drops := []string{
 		"? for shortcuts",
+		"shortcuts",
 		"esc to interrupt",
+		"esctointerrupt",
 		"ctrl+c",
 		"ctrl+d",
 		"press enter",
 		"thinking",
 		"tinkering",
+		"composing",
 		"cwd:",
 		"welcome back",
+		"welcomeback",
 		"what's new",
+		"whatsnew",
 		"tips for getting started",
+		"tipsforgettingstarted",
 		"run /init",
+		"run/init",
 		"release-notes",
 		"mcp server failed",
+		"mcpserver failed",
+		"mcpserverfailed",
 		"running stop hooks",
 		"tokens)",
 		"claude code",
+		"claudecode",
 		"esc to interrupt",
+		"caveman mode",
+		"cavemanmode",
+		"baked for",
+		"effort",
 	}
 	lower := strings.ToLower(line)
 	for _, drop := range drops {

@@ -63,6 +63,7 @@ func (r *Registry) Create(input CreateInput, item provider.Provider) Session {
 		CreatedAt:         now,
 		UpdatedAt:         now,
 		Messages:          []Message{},
+		PendingActions:    []PendingAction{},
 	}
 
 	r.mu.Lock()
@@ -224,6 +225,47 @@ func (r *Registry) AppendTerminalOutput(sessionID string, text string) (Session,
 	return clone(*session), nil
 }
 
+func (r *Registry) AppendTerminalView(sessionID string, text string) (Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	session, ok := r.sessions[sessionID]
+	if !ok {
+		return Session{}, errors.New("session not found")
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return clone(*session), nil
+	}
+	if session.TerminalView != "" {
+		session.TerminalView += "\n"
+	}
+	session.TerminalView += text
+	if len(session.TerminalView) > 80_000 {
+		session.TerminalView = session.TerminalView[len(session.TerminalView)-80_000:]
+	}
+	session.UpdatedAt = timestamp()
+	return clone(*session), nil
+}
+
+func (r *Registry) SetPendingPrompt(sessionID string, question string, actions []PendingAction) (Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	session, ok := r.sessions[sessionID]
+	if !ok {
+		return Session{}, errors.New("session not found")
+	}
+	session.PendingQuestion = strings.TrimSpace(question)
+	session.PendingActions = append([]PendingAction(nil), actions...)
+	session.UpdatedAt = timestamp()
+	return clone(*session), nil
+}
+
+func (r *Registry) ClearPendingPrompt(sessionID string) (Session, error) {
+	return r.SetPendingPrompt(sessionID, "", nil)
+}
+
 func (r *Registry) appendMessage(sessionID string, message Message) (Session, error) {
 	if message.Text == "" {
 		return Session{}, errors.New("message cannot be empty")
@@ -246,6 +288,10 @@ func clone(input Session) Session {
 	input.Messages = append([]Message(nil), input.Messages...)
 	if input.Messages == nil {
 		input.Messages = []Message{}
+	}
+	input.PendingActions = append([]PendingAction(nil), input.PendingActions...)
+	if input.PendingActions == nil {
+		input.PendingActions = []PendingAction{}
 	}
 	return input
 }

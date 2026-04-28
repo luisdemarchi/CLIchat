@@ -131,10 +131,6 @@ func (s *server) send(w http.ResponseWriter, r *http.Request, sessionID string) 
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if strings.TrimSpace(input.Text) == "" {
-		writeError(w, http.StatusBadRequest, "text is required")
-		return
-	}
 	if err := s.manager.SendLine(sessionID, input.Text); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return

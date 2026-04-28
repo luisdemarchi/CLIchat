@@ -23,6 +23,12 @@ export interface Message {
   createdAt: string;
 }
 
+export interface PendingAction {
+  id: string;
+  label: string;
+  input: string;
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -41,7 +47,9 @@ export interface Session {
   updatedAt: string;
   messages: Message[];
   terminalOutput: string;
+  terminalView: string;
   pendingQuestion?: string;
+  pendingActions: PendingAction[];
   terminalAttached: boolean;
 }
 
