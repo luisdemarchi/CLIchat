@@ -28,11 +28,13 @@ var trailingTUIStatusPattern = regexp.MustCompile(`(?i)\s*(creating|processing|t
 var trailingDecorPattern = regexp.MustCompile(`(?:\s*[✢✣✤✥✦✧✶✷✸✹✺✻✼✽✾✿*+·•]\s*|\s+\d+\s*)+$`)
 
 type App struct {
-	ctx       context.Context
-	registry  *session.Registry
-	providers []provider.Provider
-	host      *hostclient.Client
-	outputs   *outputFilter
+	ctx          context.Context
+	registry     *session.Registry
+	providers    []provider.Provider
+	host         *hostclient.Client
+	outputs      *outputFilter
+	transcriptMu sync.Mutex
+	transcripts  map[string]context.CancelFunc
 }
 
 type TerminalInput struct {
@@ -62,10 +64,11 @@ func New() *App {
 	registry := session.NewRegistry()
 
 	return &App{
-		registry:  registry,
-		providers: providers,
-		host:      hostclient.New(""),
-		outputs:   newOutputFilter(),
+		registry:    registry,
+		providers:   providers,
+		host:        hostclient.New(""),
+		outputs:     newOutputFilter(),
+		transcripts: make(map[string]context.CancelFunc),
 	}
 }
 
@@ -127,6 +130,9 @@ func (a *App) CreateChat(input session.CreateInput) (session.Session, error) {
 	created, _ = a.registry.SetLastMessage(created.ID, fmt.Sprintf("%s pronto no terminal local.", item.Name))
 	a.outputs.register(created.ID)
 	a.subscribeHost(created.ID)
+	if item.ID == provider.Claude {
+		a.startClaudeTranscriptWatcher(created.ID, created.CWD)
+	}
 	a.emitState()
 	return created, nil
 }
@@ -266,7 +272,7 @@ func (a *App) handleTerminalOutput(sessionID string, raw string) {
 		}
 	}
 	current, ok := a.registry.Get(sessionID)
-	if ok && current.Status == session.Busy {
+	if ok && current.Status == session.Busy && current.ProviderID != provider.Claude {
 		a.outputs.add(sessionID, raw, func(text string) {
 			if text == "" {
 				a.emitState()
@@ -306,6 +312,24 @@ func (a *App) subscribeHost(sessionID string) {
 			switch event.Type {
 			case "output":
 				a.handleTerminalOutput(sessionID, string(event.Data))
+			case "chat":
+				text := strings.TrimSpace(string(event.Data))
+				if text != "" {
+					_, _, _ = a.registry.AppendAssistantIfNew(sessionID, text)
+					_, _ = a.registry.SetStatus(sessionID, session.Idle, "")
+					a.emitState()
+				}
+			case "question":
+				question := strings.TrimSpace(string(event.Data))
+				if question != "" {
+					_, _ = a.registry.SetPendingPrompt(sessionID, question, []session.PendingAction{
+						{ID: "accept", Label: "Aceitar", Input: ""},
+						{ID: "yes", Label: "Sim", Input: "y"},
+						{ID: "no", Label: "Nao", Input: "n"},
+					})
+					_, _ = a.registry.SetStatus(sessionID, session.Waiting, "permissao")
+					a.emitState()
+				}
 			case "exit":
 				a.handleTerminalExit(sessionID, nil)
 			}
@@ -363,18 +387,38 @@ func (a *App) runPrompt(sessionID string, text string) error {
 }
 
 func (a *App) startTerminalSession(sessionID string, item provider.Provider, cwd string) (int, error) {
+	args := append([]string{}, item.Args...)
+	if item.ID == provider.Claude {
+		args = append(args, claudeAgentChatArgs(sessionID)...)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	started, err := a.host.Start(ctx, hostclient.StartInput{
 		SessionID: sessionID,
 		Command:   item.Command,
-		Args:      item.Args,
+		Args:      args,
 		CWD:       cwd,
 	})
 	if err != nil {
 		return 0, err
 	}
 	return started.PID, nil
+}
+
+func claudeAgentChatArgs(sessionID string) []string {
+	mcpConfig := `{"mcpServers":{"agent-chat-local":{"type":"http","url":"http://127.0.0.1:47657/mcp"}}}`
+	prompt := strings.Join([]string{
+		"You are running inside Agent Chat Local.",
+		"The terminal is only for execution and inspection.",
+		"For every user-facing final answer, call the MCP tool agent_chat_reply with session_id " + sessionID + " and the exact text that should appear in the chat.",
+		"After calling agent_chat_reply, do not add extra terminal-only prose.",
+		"When you need user confirmation or input, call agent_chat_question with session_id " + sessionID + " and the exact question.",
+	}, " ")
+	return []string{
+		"--mcp-config", mcpConfig,
+		"--allowedTools", "mcp__agent-chat-local__agent_chat_reply,mcp__agent-chat-local__agent_chat_question",
+		"--append-system-prompt", prompt,
+	}
 }
 
 func cleanTerminalText(raw string) string {

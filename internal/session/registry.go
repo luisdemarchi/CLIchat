@@ -137,6 +137,32 @@ func (r *Registry) AppendAssistant(sessionID string, text string) (Session, erro
 	return r.appendMessage(sessionID, Message{ID: newID(), Role: Assistant, Type: Text, Text: strings.TrimSpace(text), CreatedAt: timestamp()})
 }
 
+func (r *Registry) AppendAssistantIfNew(sessionID string, text string) (Session, bool, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return Session{}, false, errors.New("message cannot be empty")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	session, ok := r.sessions[sessionID]
+	if !ok {
+		return Session{}, false, errors.New("session not found")
+	}
+	if len(session.Messages) > 0 {
+		last := session.Messages[len(session.Messages)-1]
+		if last.Role == Assistant && strings.TrimSpace(last.Text) == text {
+			return clone(*session), false, nil
+		}
+	}
+	message := Message{ID: newID(), Role: Assistant, Type: Text, Text: text, CreatedAt: timestamp()}
+	session.Messages = append(session.Messages, message)
+	session.LastMessage = message.Text
+	session.UpdatedAt = message.CreatedAt
+	return clone(*session), true, nil
+}
+
 func (r *Registry) AppendSystem(sessionID string, text string) (Session, error) {
 	return r.appendMessage(sessionID, Message{ID: newID(), Role: System, Type: Text, Text: strings.TrimSpace(text), CreatedAt: timestamp()})
 }

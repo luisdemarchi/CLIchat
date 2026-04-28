@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"agent-chat-local/internal/mirror"
@@ -22,8 +23,16 @@ const (
 )
 
 type server struct {
-	manager *terminal.Manager
-	mirror  *mirror.Server
+	manager   *terminal.Manager
+	mirror    *mirror.Server
+	eventsMu  sync.Mutex
+	nextSubID int
+	eventSubs map[string]map[int]chan hostEvent
+}
+
+type hostEvent struct {
+	Type string
+	Data []byte
 }
 
 type startRequest struct {
@@ -50,7 +59,7 @@ func main() {
 	}
 
 	manager := terminal.NewManager()
-	s := &server{manager: manager}
+	s := &server{manager: manager, eventSubs: make(map[string]map[int]chan hostEvent)}
 	s.mirror = mirror.NewServer(manager, nil, nil)
 	if err := s.mirror.Start(defaultTTYAddress); err != nil {
 		log.Fatalf("attach server: %v", err)
@@ -58,6 +67,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.health)
+	mux.HandleFunc("/mcp", s.mcp)
 	mux.HandleFunc("/v1/sessions", s.sessions)
 	mux.HandleFunc("/v1/sessions/", s.session)
 
@@ -164,6 +174,8 @@ func (s *server) events(w http.ResponseWriter, r *http.Request, sessionID string
 		return
 	}
 	defer unsubscribe()
+	hostEvents, unsubscribeHost := s.subscribeEvents(sessionID)
+	defer unsubscribeHost()
 
 	w.Header().Set("content-type", "text/event-stream")
 	w.Header().Set("cache-control", "no-cache")
@@ -189,6 +201,9 @@ func (s *server) events(w http.ResponseWriter, r *http.Request, sessionID string
 			}
 			writeEvent(w, "output", chunk, "")
 			flusher.Flush()
+		case event := <-hostEvents:
+			writeEvent(w, event.Type, event.Data, "")
+			flusher.Flush()
 		case <-ticker.C:
 			writeEvent(w, "ping", nil, "")
 			flusher.Flush()
@@ -199,6 +214,183 @@ func (s *server) events(w http.ResponseWriter, r *http.Request, sessionID string
 			return
 		}
 	}
+}
+
+func (s *server) subscribeEvents(sessionID string) (<-chan hostEvent, func()) {
+	s.eventsMu.Lock()
+	defer s.eventsMu.Unlock()
+	s.nextSubID++
+	id := s.nextSubID
+	ch := make(chan hostEvent, 32)
+	if s.eventSubs[sessionID] == nil {
+		s.eventSubs[sessionID] = make(map[int]chan hostEvent)
+	}
+	s.eventSubs[sessionID][id] = ch
+	return ch, func() {
+		s.eventsMu.Lock()
+		defer s.eventsMu.Unlock()
+		if subs := s.eventSubs[sessionID]; subs != nil {
+			if sub, ok := subs[id]; ok {
+				delete(subs, id)
+				close(sub)
+			}
+			if len(subs) == 0 {
+				delete(s.eventSubs, sessionID)
+			}
+		}
+	}
+}
+
+func (s *server) emit(sessionID string, event hostEvent) {
+	s.eventsMu.Lock()
+	defer s.eventsMu.Unlock()
+	for _, sub := range s.eventSubs[sessionID] {
+		select {
+		case sub <- event:
+		default:
+		}
+	}
+}
+
+type rpcRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      any             `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type toolCallParams struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req rpcRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.ID == nil {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	switch req.Method {
+	case "initialize":
+		writeRPCResult(w, req.ID, map[string]any{
+			"protocolVersion": "2024-11-05",
+			"capabilities": map[string]any{
+				"tools": map[string]any{},
+			},
+			"serverInfo": map[string]any{
+				"name":    "agent-chat-local",
+				"version": "0.1.0",
+			},
+		})
+	case "tools/list":
+		writeRPCResult(w, req.ID, map[string]any{
+			"tools": []map[string]any{
+				{
+					"name":        "agent_chat_reply",
+					"description": "Send the exact user-facing assistant reply to the Agent Chat Local UI. Call once per final response.",
+					"inputSchema": map[string]any{
+						"type":     "object",
+						"required": []string{"session_id", "text"},
+						"properties": map[string]any{
+							"session_id": map[string]any{"type": "string"},
+							"text":       map[string]any{"type": "string"},
+						},
+					},
+				},
+				{
+					"name":        "agent_chat_question",
+					"description": "Ask the user for confirmation/input in the Agent Chat Local UI.",
+					"inputSchema": map[string]any{
+						"type":     "object",
+						"required": []string{"session_id", "question"},
+						"properties": map[string]any{
+							"session_id": map[string]any{"type": "string"},
+							"question":   map[string]any{"type": "string"},
+						},
+					},
+				},
+			},
+		})
+	case "tools/call":
+		var params toolCallParams
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			writeRPCError(w, req.ID, -32602, "invalid tool params")
+			return
+		}
+		sessionID := stringArg(params.Arguments, "session_id")
+		if sessionID == "" {
+			writeRPCError(w, req.ID, -32602, "session_id is required")
+			return
+		}
+		switch params.Name {
+		case "agent_chat_reply":
+			text := strings.TrimSpace(stringArg(params.Arguments, "text"))
+			if text != "" {
+				s.emit(sessionID, hostEvent{Type: "chat", Data: []byte(text)})
+			}
+			writeToolResult(w, req.ID, "ok")
+		case "agent_chat_question":
+			question := strings.TrimSpace(stringArg(params.Arguments, "question"))
+			if question != "" {
+				s.emit(sessionID, hostEvent{Type: "question", Data: []byte(question)})
+			}
+			writeToolResult(w, req.ID, "ok")
+		default:
+			writeRPCError(w, req.ID, -32602, "unknown tool")
+		}
+	default:
+		writeRPCError(w, req.ID, -32601, "method not found")
+	}
+}
+
+func stringArg(args map[string]any, key string) string {
+	if args == nil {
+		return ""
+	}
+	if value, ok := args[key].(string); ok {
+		return value
+	}
+	return ""
+}
+
+func writeToolResult(w http.ResponseWriter, id any, text string) {
+	writeRPCResult(w, id, map[string]any{
+		"content": []map[string]string{{"type": "text", "text": text}},
+	})
+}
+
+func writeRPCResult(w http.ResponseWriter, id any, result any) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"result":  result,
+	})
+}
+
+func writeRPCError(w http.ResponseWriter, id any, code int, message string) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error": map[string]any{
+			"code":    code,
+			"message": message,
+		},
+	})
 }
 
 func parseSessionPath(path string) (string, string, bool) {
