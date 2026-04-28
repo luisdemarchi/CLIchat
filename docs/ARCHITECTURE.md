@@ -13,9 +13,11 @@ React UI (Wails WebView)
   -> event stream back to UI
 ```
 
-## Decisao sobre terminal externo
+## Chat versus Terminal
 
-O app deve ser dono do PTY. Isso evita depender de AppleScript, Terminal.app, iTerm2 ou tmux para recuperar uma sessao.
+O chat nao deve mostrar transcript bruto de terminal. A UI principal renderiza apenas baloes de conversa: texto agora, audio/imagem depois. Spinners, prompts, menus TUI, comandos e logs ficam fora do chat.
+
+O app deve ser dono do PTY. Isso evita depender de AppleScript, Terminal.app, iTerm2 ou tmux para recuperar uma sessao. Qualquer terminal externo se conecta ao PTY pelo `agentctl`, no mesmo modelo mental do `rtk`: um binario pequeno entra entre a ferramenta e o terminal para interceptar/rotear IO.
 
 Fluxo desejado:
 
@@ -23,7 +25,7 @@ Fluxo desejado:
 2. Core Go inicia `claude`, `gemini` ou `codex` em um PTY oculto.
 3. UI envia texto para o PTY e renderiza stdout/stderr como mensagens/eventos.
 4. Se o usuario pedir terminal externo, o terminal roda `agentctl attach <session-id>`.
-5. `agentctl` conecta no servidor local do app e espelha o mesmo PTY.
+5. `agentctl` conecta no servidor local do app e espelha/controla o mesmo PTY.
 
 ## Equivalencias vindas do claude-voice
 

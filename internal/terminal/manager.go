@@ -57,6 +57,26 @@ func (m *Manager) SendLine(sessionID string, text string) error {
 	return process.SendLine(text)
 }
 
+func (m *Manager) Send(sessionID string, data []byte) error {
+	m.mu.RLock()
+	process := m.processes[sessionID]
+	m.mu.RUnlock()
+	if process == nil {
+		return errors.New("terminal process not found")
+	}
+	return process.Write(data)
+}
+
+func (m *Manager) Subscribe(sessionID string) (<-chan []byte, func(), error) {
+	m.mu.RLock()
+	process := m.processes[sessionID]
+	m.mu.RUnlock()
+	if process == nil {
+		return nil, nil, errors.New("terminal process not found")
+	}
+	return process.Subscribe()
+}
+
 func (m *Manager) Stop(sessionID string) error {
 	m.mu.Lock()
 	process := m.processes[sessionID]

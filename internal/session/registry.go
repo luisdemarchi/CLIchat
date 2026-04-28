@@ -57,18 +57,11 @@ func (r *Registry) Create(input CreateInput, item provider.Provider) Session {
 		Status:         Idle,
 		CWD:            strings.TrimSpace(input.CWD),
 		AvatarLabel:    avatarLabel(title, item.Name),
-		LastMessage:    "Aguardando primeira mensagem.",
+		LastMessage:    "Iniciando terminal...",
 		ExternalAttach: fmt.Sprintf("agentctl attach %s", id),
 		CreatedAt:      now,
 		UpdatedAt:      now,
-		Messages: []Message{
-			{
-				ID:        newID(),
-				Role:      System,
-				Text:      "Chat criado. O proximo passo e conectar este estado a um PTY persistente.",
-				CreatedAt: now,
-			},
-		},
+		Messages:       []Message{},
 	}
 
 	r.mu.Lock()
@@ -135,15 +128,15 @@ func (r *Registry) Selected() (Session, bool) {
 }
 
 func (r *Registry) AppendUser(sessionID string, text string) (Session, error) {
-	return r.appendMessage(sessionID, Message{ID: newID(), Role: User, Text: strings.TrimSpace(text), CreatedAt: timestamp()})
+	return r.appendMessage(sessionID, Message{ID: newID(), Role: User, Type: Text, Text: strings.TrimSpace(text), CreatedAt: timestamp()})
 }
 
 func (r *Registry) AppendAssistant(sessionID string, text string) (Session, error) {
-	return r.appendMessage(sessionID, Message{ID: newID(), Role: Assistant, Text: strings.TrimSpace(text), CreatedAt: timestamp()})
+	return r.appendMessage(sessionID, Message{ID: newID(), Role: Assistant, Type: Text, Text: strings.TrimSpace(text), CreatedAt: timestamp()})
 }
 
 func (r *Registry) AppendSystem(sessionID string, text string) (Session, error) {
-	return r.appendMessage(sessionID, Message{ID: newID(), Role: System, Text: strings.TrimSpace(text), CreatedAt: timestamp()})
+	return r.appendMessage(sessionID, Message{ID: newID(), Role: System, Type: Text, Text: strings.TrimSpace(text), CreatedAt: timestamp()})
 }
 
 func (r *Registry) SetStatus(sessionID string, status Status, tool string) (Session, error) {
@@ -170,6 +163,19 @@ func (r *Registry) SetTerminal(sessionID string, attached bool, processID int) (
 	}
 	session.TerminalAttached = attached
 	session.ProcessID = processID
+	session.UpdatedAt = timestamp()
+	return clone(*session), nil
+}
+
+func (r *Registry) SetLastMessage(sessionID string, text string) (Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	session, ok := r.sessions[sessionID]
+	if !ok {
+		return Session{}, errors.New("session not found")
+	}
+	session.LastMessage = strings.TrimSpace(text)
 	session.UpdatedAt = timestamp()
 	return clone(*session), nil
 }

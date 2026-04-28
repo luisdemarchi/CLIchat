@@ -1,12 +1,14 @@
 export type ProviderId = 'claude' | 'gemini' | 'codex';
 export type SessionStatus = 'idle' | 'busy' | 'waiting' | 'offline';
 export type MessageRole = 'user' | 'assistant' | 'system';
+export type MessageType = 'text' | 'audio' | 'image';
 
 export interface Provider {
   id: ProviderId;
   name: string;
   cli: string;
   command: string;
+  args: string[];
   tag: string;
   accent: string;
   available: boolean;
@@ -16,6 +18,7 @@ export interface Provider {
 export interface Message {
   id: string;
   role: MessageRole;
+  type: MessageType;
   text: string;
   createdAt: string;
 }

@@ -15,14 +15,15 @@ const (
 )
 
 type Provider struct {
-	ID          ID     `json:"id"`
-	Name        string `json:"name"`
-	CLI         string `json:"cli"`
-	Command     string `json:"command"`
-	Tag         string `json:"tag"`
-	Accent      string `json:"accent"`
-	Available   bool   `json:"available"`
-	Description string `json:"description"`
+	ID          ID       `json:"id"`
+	Name        string   `json:"name"`
+	CLI         string   `json:"cli"`
+	Command     string   `json:"command"`
+	Args        []string `json:"args"`
+	Tag         string   `json:"tag"`
+	Accent      string   `json:"accent"`
+	Available   bool     `json:"available"`
+	Description string   `json:"description"`
 }
 
 func Defaults() []Provider {
@@ -39,6 +40,7 @@ func Defaults() []Provider {
 			ID:          Gemini,
 			Name:        "Gemini",
 			CLI:         "gemini",
+			Args:        []string{"--screen-reader"},
 			Tag:         "GEMINI",
 			Accent:      "#167c80",
 			Description: "Gemini CLI em uma sessao local controlada pelo app.",
@@ -47,6 +49,7 @@ func Defaults() []Provider {
 			ID:          Codex,
 			Name:        "Codex",
 			CLI:         "codex",
+			Args:        []string{"--no-alt-screen"},
 			Tag:         "CODEX",
 			Accent:      "#a45f18",
 			Description: "Codex CLI em uma sessao local controlada pelo app.",

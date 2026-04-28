@@ -5,6 +5,7 @@ package terminal
 import (
 	"os"
 	"os/exec"
+	"sync"
 
 	"github.com/creack/pty"
 )
@@ -15,6 +16,9 @@ type Process struct {
 	pty       *os.File
 	onOutput  OutputFunc
 	onExit    ExitFunc
+	mu        sync.RWMutex
+	nextSubID int
+	subs      map[int]chan []byte
 }
 
 func startProcess(options StartOptions) (*Process, error) {
@@ -35,6 +39,7 @@ func startProcess(options StartOptions) (*Process, error) {
 		pty:       file,
 		onOutput:  options.OnOutput,
 		onExit:    options.OnExit,
+		subs:      make(map[int]chan []byte),
 	}
 	go process.readLoop()
 	go process.wait()
@@ -46,11 +51,37 @@ func (p *Process) SendLine(text string) error {
 	return err
 }
 
+func (p *Process) Write(data []byte) error {
+	_, err := p.pty.Write(data)
+	return err
+}
+
 func (p *Process) PID() int {
 	if p.cmd != nil && p.cmd.Process != nil {
 		return p.cmd.Process.Pid
 	}
 	return 0
+}
+
+func (p *Process) Subscribe() (<-chan []byte, func(), error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.nextSubID++
+	id := p.nextSubID
+	ch := make(chan []byte, 128)
+	p.subs[id] = ch
+
+	unsubscribe := func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if sub, ok := p.subs[id]; ok {
+			delete(p.subs, id)
+			close(sub)
+		}
+	}
+
+	return ch, unsubscribe, nil
 }
 
 func (p *Process) Stop() error {
@@ -68,10 +99,23 @@ func (p *Process) readLoop() {
 	for {
 		n, err := p.pty.Read(buffer)
 		if n > 0 && p.onOutput != nil {
-			p.onOutput(p.sessionID, string(buffer[:n]))
+			chunk := append([]byte(nil), buffer[:n]...)
+			p.broadcast(chunk)
+			p.onOutput(p.sessionID, string(chunk))
 		}
 		if err != nil {
 			return
+		}
+	}
+}
+
+func (p *Process) broadcast(chunk []byte) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, sub := range p.subs {
+		select {
+		case sub <- append([]byte(nil), chunk...):
+		default:
 		}
 	}
 }

@@ -13,7 +13,8 @@ App desktop pessoal para conversar com agentes locais de IA em um modelo parecid
 - Lista de conversas com foto/status visual.
 - Tags de provedor: Claude, Gemini e Codex.
 - Estado de sessao inspirado no `claude-voice`: `idle`, `busy`, `waiting`, `offline`, ultima mensagem e ferramenta atual.
-- Comando planejado para abrir/acompanhar terminal externo: `agentctl attach <session-id>`.
+- Chat limpo: baloes de conversa `text`, com estrutura preparada para `audio` e `image`.
+- Terminal bruto separado: `agentctl attach <session-id>` abre/conecta qualquer terminal externo ao PTY oculto da conversa.
 - Modulo separado para espelhamento local/Tailscale futuro.
 
 ## Comandos
@@ -31,6 +32,14 @@ Para gerar binario:
 ```bash
 /Users/luis/go/bin/wails build
 ```
+
+Para conferir o terminal que esta por tras de uma conversa:
+
+```bash
+agentctl attach <session-id>
+```
+
+O app escuta em `127.0.0.1:47656`. O terminal externo nao cria outro LLM; ele anexa no mesmo PTY que o app abriu.
 
 ## Reuso do `claude-voice`
 

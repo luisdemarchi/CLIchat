@@ -19,11 +19,20 @@ const (
 	System    Role = "system"
 )
 
+type MessageType string
+
+const (
+	Text  MessageType = "text"
+	Audio MessageType = "audio"
+	Image MessageType = "image"
+)
+
 type Message struct {
-	ID        string `json:"id"`
-	Role      Role   `json:"role"`
-	Text      string `json:"text"`
-	CreatedAt string `json:"createdAt"`
+	ID        string      `json:"id"`
+	Role      Role        `json:"role"`
+	Type      MessageType `json:"type"`
+	Text      string      `json:"text"`
+	CreatedAt string      `json:"createdAt"`
 }
 
 type Session struct {
