@@ -30,6 +30,10 @@ type App struct {
 	outputs   *outputFilter
 }
 
+type TerminalInput struct {
+	SessionID string `json:"sessionId"`
+}
+
 type Bootstrap struct {
 	Providers []provider.Provider `json:"providers"`
 	Sessions  []session.Session   `json:"sessions"`
@@ -56,6 +60,11 @@ func (a *App) Startup(ctx context.Context) {
 	if a.mirror == nil {
 		a.mirror = mirror.NewServer(a.terminals, func(sessionID string, data []byte) {
 			a.handleTerminalOutput(sessionID, string(data))
+		}, func(sessionID string) {
+			_, _ = a.registry.SetTerminal(sessionID, true, 0)
+			_, _ = a.registry.SetStatus(sessionID, session.Idle, "")
+			_, _ = a.registry.SetLastMessage(sessionID, "Terminal externo conectado.")
+			a.emitState()
 		})
 	}
 	_ = a.mirror.Start("127.0.0.1:47656")
@@ -96,7 +105,7 @@ func (a *App) CreateChat(input session.CreateInput) (session.Session, error) {
 	if runtime.GOOS == "darwin" {
 		runCommand := "agentctl run " + created.ID + " " + shellJoin(append([]string{item.Command}, item.Args...))
 		created, _ = a.registry.SetExternalAttach(created.ID, runCommand)
-		created, _ = a.registry.SetLastMessage(created.ID, fmt.Sprintf("%s aguardando terminal externo seguro.", item.Name))
+		created, _ = a.registry.SetWaiting(created.ID, fmt.Sprintf("%s aguardando terminal externo.", item.Name))
 		a.emitState()
 		return created, nil
 	}
@@ -123,6 +132,18 @@ func (a *App) CreateChat(input session.CreateInput) (session.Session, error) {
 	return created, nil
 }
 
+func (a *App) OpenTerminal(input TerminalInput) (string, error) {
+	item, ok := a.registry.Get(input.SessionID)
+	if !ok {
+		return "", errors.New("session not found")
+	}
+	if item.ExternalAttach == "" {
+		return "", errors.New("terminal command not available")
+	}
+	wailsruntime.ClipboardSetText(a.ctx, item.ExternalAttach)
+	return item.ExternalAttach, nil
+}
+
 func (a *App) SendMessage(input session.SendInput) (session.Session, error) {
 	text := strings.TrimSpace(input.Text)
 	if text == "" {
@@ -143,9 +164,9 @@ func (a *App) SendMessage(input session.SendInput) (session.Session, error) {
 			return updated, nil
 		}
 		_, _ = a.registry.SetStatus(input.SessionID, session.Waiting, "")
-		updated, _ := a.registry.SetLastMessage(input.SessionID, "Abra o terminal externo para conectar este chat.")
+		updated, _ := a.registry.SetLastMessage(input.SessionID, "Terminal ainda nao conectado.")
 		a.emitState()
-		return updated, err
+		return updated, errors.New("terminal ainda nao conectado; use o comando exibido no topo do chat")
 	}
 
 	updated, _ := a.registry.Get(input.SessionID)

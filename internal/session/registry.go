@@ -180,6 +180,20 @@ func (r *Registry) SetLastMessage(sessionID string, text string) (Session, error
 	return clone(*session), nil
 }
 
+func (r *Registry) SetWaiting(sessionID string, text string) (Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	session, ok := r.sessions[sessionID]
+	if !ok {
+		return Session{}, errors.New("session not found")
+	}
+	session.Status = Waiting
+	session.LastMessage = strings.TrimSpace(text)
+	session.UpdatedAt = timestamp()
+	return clone(*session), nil
+}
+
 func (r *Registry) SetExternalAttach(sessionID string, command string) (Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -20,12 +20,13 @@ type Status struct {
 }
 
 type Server struct {
-	mu       sync.RWMutex
-	status   Status
-	manager  *terminal.Manager
-	listener net.Listener
-	output   func(sessionID string, data []byte)
-	external map[string]*externalSession
+	mu        sync.RWMutex
+	status    Status
+	manager   *terminal.Manager
+	listener  net.Listener
+	output    func(sessionID string, data []byte)
+	connected func(sessionID string)
+	external  map[string]*externalSession
 }
 
 type externalSession struct {
@@ -33,11 +34,12 @@ type externalSession struct {
 	conn net.Conn
 }
 
-func NewServer(manager *terminal.Manager, output func(sessionID string, data []byte)) *Server {
+func NewServer(manager *terminal.Manager, output func(sessionID string, data []byte), connected func(sessionID string)) *Server {
 	return &Server{
-		manager:  manager,
-		output:   output,
-		external: make(map[string]*externalSession),
+		manager:   manager,
+		output:    output,
+		connected: connected,
+		external:  make(map[string]*externalSession),
 		status: Status{
 			Enabled: false,
 			Mode:    "local-disabled",
@@ -179,6 +181,9 @@ func (s *Server) handleRun(conn net.Conn, reader *bufio.Reader, sessionID string
 	}
 	s.external[sessionID] = session
 	s.mu.Unlock()
+	if s.connected != nil {
+		s.connected(sessionID)
+	}
 
 	defer func() {
 		s.mu.Lock()

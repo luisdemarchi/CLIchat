@@ -1,6 +1,6 @@
 import { Check, Circle, MonitorUp, Network, Plus, Send, TerminalSquare } from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { createChat, getBootstrap, onStateUpdate, selectSession, sendMessage } from './lib/api';
+import { createChat, getBootstrap, onStateUpdate, openTerminal, selectSession, sendMessage } from './lib/api';
 import type { Bootstrap, ProviderId, Session } from './types';
 
 function statusLabel(status: Session['status']) {
@@ -38,6 +38,7 @@ export function App() {
     if (!state) return undefined;
     return state.sessions.find((session) => session.id === selectedID) ?? state.selected ?? state.sessions[0];
   }, [selectedID, state]);
+  const canSend = Boolean(selected?.terminalAttached);
 
   async function handleSelect(session: Session) {
     setSelectedID(session.id);
@@ -71,6 +72,10 @@ export function App() {
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!selected || draft.trim() === '') return;
+    if (!selected.terminalAttached) {
+      setError('Conecte o terminal externo antes de enviar mensagens.');
+      return;
+    }
 
     const text = draft.trim();
     setDraft('');
@@ -85,6 +90,17 @@ export function App() {
           selected: updated,
         };
       });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleOpenTerminal() {
+    if (!selected) return;
+    setError('');
+    try {
+      const command = await openTerminal({ sessionId: selected.id });
+      setError(`Comando copiado: ${command}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -170,12 +186,22 @@ export function App() {
             <span className="provider-tag" style={{ borderColor: selected.providerAccent, color: selected.providerAccent }}>
               {selected.providerTag}
             </span>
-            <button type="button" className="icon-button" title={selected.externalAttach}>
+            <button type="button" className="icon-button" title={selected.externalAttach} onClick={() => void handleOpenTerminal()}>
               <MonitorUp size={18} />
             </button>
           </header>
 
           <div className="messages">
+            {!selected.terminalAttached ? (
+              <section className="connect-panel">
+                <strong>Terminal externo necessario</strong>
+                <span>Copie e rode este comando em um terminal para conectar o Claude com seguranca.</span>
+                <code>{selected.externalAttach}</code>
+                <button type="button" onClick={() => void handleOpenTerminal()}>
+                  Copiar comando
+                </button>
+              </section>
+            ) : null}
             {(selected.messages ?? []).map((message) => (
               <article className={`bubble ${message.role}`} key={message.id}>
                 <p>{message.text}</p>
@@ -192,8 +218,9 @@ export function App() {
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               placeholder={`Mensagem para ${selected.providerTag}`}
+              disabled={!canSend}
             />
-            <button type="submit" title="Enviar">
+            <button type="submit" title="Enviar" disabled={!canSend}>
               <Send size={18} />
             </button>
           </form>
