@@ -298,6 +298,16 @@ select {
   font-size: 12px;
 }
 
+.attach-command {
+  display: block;
+  overflow: hidden;
+  margin-top: 4px;
+  color: #4a534a;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .provider-tag {
   border: 1px solid;
   border-radius: 999px;

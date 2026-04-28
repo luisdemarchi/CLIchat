@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +15,7 @@ import (
 	"agent-chat-local/internal/provider"
 	"agent-chat-local/internal/session"
 	"agent-chat-local/internal/terminal"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 var ansiPattern = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\a]*(?:\a|\x1b\\))`)
@@ -44,7 +45,7 @@ func New() *App {
 	return &App{
 		registry:  registry,
 		providers: providers,
-		mirror:    mirror.NewServer(terminals),
+		mirror:    nil,
 		terminals: terminals,
 		outputs:   newOutputFilter(),
 	}
@@ -52,6 +53,11 @@ func New() *App {
 
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
+	if a.mirror == nil {
+		a.mirror = mirror.NewServer(a.terminals, func(sessionID string, data []byte) {
+			a.handleTerminalOutput(sessionID, string(data))
+		})
+	}
 	_ = a.mirror.Start("127.0.0.1:47656")
 	a.emitState()
 }
@@ -87,6 +93,14 @@ func (a *App) CreateChat(input session.CreateInput) (session.Session, error) {
 	}
 
 	created := a.registry.Create(input, item)
+	if runtime.GOOS == "darwin" {
+		runCommand := "agentctl run " + created.ID + " " + shellJoin(append([]string{item.Command}, item.Args...))
+		created, _ = a.registry.SetExternalAttach(created.ID, runCommand)
+		created, _ = a.registry.SetLastMessage(created.ID, fmt.Sprintf("%s aguardando terminal externo seguro.", item.Name))
+		a.emitState()
+		return created, nil
+	}
+
 	process, err := a.terminals.Start(terminal.StartOptions{
 		SessionID: created.ID,
 		Command:   item.Command,
@@ -123,8 +137,13 @@ func (a *App) SendMessage(input session.SendInput) (session.Session, error) {
 	}
 	a.outputs.rememberInput(input.SessionID, text)
 	if err := a.terminals.SendLine(input.SessionID, text); err != nil {
-		_, _ = a.registry.SetStatus(input.SessionID, session.Offline, "")
-		updated, _ := a.registry.SetLastMessage(input.SessionID, "Nao foi possivel enviar para o terminal.")
+		if a.mirror != nil && a.mirror.Send(input.SessionID, []byte(text+"\r")) {
+			updated, _ := a.registry.Get(input.SessionID)
+			a.emitState()
+			return updated, nil
+		}
+		_, _ = a.registry.SetStatus(input.SessionID, session.Waiting, "")
+		updated, _ := a.registry.SetLastMessage(input.SessionID, "Abra o terminal externo para conectar este chat.")
 		a.emitState()
 		return updated, err
 	}
@@ -143,6 +162,9 @@ func (a *App) ExternalAttachCommand(sessionID string) (string, error) {
 }
 
 func (a *App) MirrorStatus() mirror.Status {
+	if a.mirror == nil {
+		return mirror.Status{}
+	}
 	return a.mirror.Status()
 }
 
@@ -203,6 +225,21 @@ func cleanTerminalText(raw string) string {
 	}, cleaned)
 	cleaned = strings.TrimSpace(cleaned)
 	return cleaned
+}
+
+func shellJoin(parts []string) string {
+	quoted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		if strings.ContainsAny(part, " \t\n'\"\\$`") {
+			quoted = append(quoted, "'"+strings.ReplaceAll(part, "'", "'\\''")+"'")
+			continue
+		}
+		quoted = append(quoted, part)
+	}
+	return strings.Join(quoted, " ")
 }
 
 type outputFilter struct {
@@ -327,7 +364,7 @@ func (a *App) bootstrap() Bootstrap {
 		Providers: a.providers,
 		Sessions:  a.registry.List(),
 		Selected:  selected,
-		Mirror:    a.mirror.Status(),
+		Mirror:    a.MirrorStatus(),
 	}
 }
 
@@ -335,5 +372,5 @@ func (a *App) emitState() {
 	if a.ctx == nil {
 		return
 	}
-	runtime.EventsEmit(a.ctx, "state:update", a.bootstrap())
+	wailsruntime.EventsEmit(a.ctx, "state:update", a.bootstrap())
 }

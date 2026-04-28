@@ -24,11 +24,20 @@ type Server struct {
 	status   Status
 	manager  *terminal.Manager
 	listener net.Listener
+	output   func(sessionID string, data []byte)
+	external map[string]*externalSession
 }
 
-func NewServer(manager *terminal.Manager) *Server {
+type externalSession struct {
+	mu   sync.Mutex
+	conn net.Conn
+}
+
+func NewServer(manager *terminal.Manager, output func(sessionID string, data []byte)) *Server {
 	return &Server{
-		manager: manager,
+		manager:  manager,
+		output:   output,
+		external: make(map[string]*externalSession),
 		status: Status{
 			Enabled: false,
 			Mode:    "local-disabled",
@@ -57,7 +66,7 @@ func (s *Server) Start(address string) error {
 		Enabled: true,
 		Mode:    "local-attach",
 		Address: listener.Addr().String(),
-		Note:    "Terminais externos podem anexar com agentctl attach <session-id>.",
+		Note:    "Terminais externos podem usar agentctl run/attach.",
 	}
 	s.mu.Unlock()
 
@@ -71,6 +80,20 @@ func (s *Server) Status() Status {
 	return s.status
 }
 
+func (s *Server) Send(sessionID string, data []byte) bool {
+	s.mu.RLock()
+	external := s.external[sessionID]
+	s.mu.RUnlock()
+	if external == nil {
+		return false
+	}
+
+	external.mu.Lock()
+	defer external.mu.Unlock()
+	_, err := external.conn.Write(data)
+	return err == nil
+}
+
 func (s *Server) acceptLoop(listener net.Listener) {
 	for {
 		conn, err := listener.Accept()
@@ -82,20 +105,34 @@ func (s *Server) acceptLoop(listener net.Listener) {
 }
 
 func (s *Server) handleConn(conn net.Conn) {
-	defer conn.Close()
-
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadString('\n')
 	if err != nil {
-		_, _ = fmt.Fprintln(conn, "ERR missing attach command")
+		_, _ = fmt.Fprintln(conn, "ERR missing command")
+		_ = conn.Close()
 		return
 	}
 
-	sessionID, err := parseAttachLine(line)
+	command, sessionID, err := parseCommandLine(line)
 	if err != nil {
 		_, _ = fmt.Fprintln(conn, "ERR "+err.Error())
+		_ = conn.Close()
 		return
 	}
+
+	switch command {
+	case "ATTACH":
+		s.handleAttach(conn, reader, sessionID)
+	case "RUN":
+		s.handleRun(conn, reader, sessionID)
+	default:
+		_, _ = fmt.Fprintln(conn, "ERR unsupported command")
+		_ = conn.Close()
+	}
+}
+
+func (s *Server) handleAttach(conn net.Conn, reader *bufio.Reader, sessionID string) {
+	defer conn.Close()
 
 	output, unsubscribe, err := s.manager.Subscribe(sessionID)
 	if err != nil {
@@ -124,9 +161,6 @@ func (s *Server) handleConn(conn net.Conn) {
 				_ = s.manager.Send(sessionID, buffer[:n])
 			}
 			if err != nil {
-				if !errors.Is(err, io.EOF) {
-					_, _ = fmt.Fprintln(conn, "ERR "+err.Error())
-				}
 				break
 			}
 		}
@@ -136,10 +170,51 @@ func (s *Server) handleConn(conn net.Conn) {
 	<-done
 }
 
-func parseAttachLine(line string) (string, error) {
-	fields := strings.Fields(strings.TrimSpace(line))
-	if len(fields) != 2 || strings.ToUpper(fields[0]) != "ATTACH" {
-		return "", errors.New("usage: ATTACH <session-id>")
+func (s *Server) handleRun(conn net.Conn, reader *bufio.Reader, sessionID string) {
+	session := &externalSession{conn: conn}
+
+	s.mu.Lock()
+	if old := s.external[sessionID]; old != nil {
+		_ = old.conn.Close()
 	}
-	return fields[1], nil
+	s.external[sessionID] = session
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		if s.external[sessionID] == session {
+			delete(s.external, sessionID)
+		}
+		s.mu.Unlock()
+		_ = conn.Close()
+	}()
+
+	_, _ = fmt.Fprintf(conn, "OK running %s\r\n", sessionID)
+
+	buffer := make([]byte, 4096)
+	for {
+		n, err := reader.Read(buffer)
+		if n > 0 && s.output != nil {
+			chunk := append([]byte(nil), buffer[:n]...)
+			s.output(sessionID, chunk)
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				_, _ = fmt.Fprintln(conn, "ERR "+err.Error())
+			}
+			return
+		}
+	}
+}
+
+func parseCommandLine(line string) (string, string, error) {
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) != 2 {
+		return "", "", errors.New("usage: ATTACH|RUN <session-id>")
+	}
+	command := strings.ToUpper(fields[0])
+	if command != "ATTACH" && command != "RUN" {
+		return "", "", errors.New("usage: ATTACH|RUN <session-id>")
+	}
+	return command, fields[1], nil
 }

@@ -160,12 +160,13 @@ export function App() {
             </div>
             <div className="title-block">
               <strong>{selected.title}</strong>
-              <span>
-                {statusLabel(selected.status)}
-                {selected.processId ? ` - pid ${selected.processId}` : ''}
-                {selected.currentTool ? ` - ${selected.currentTool}` : ''}
-              </span>
-            </div>
+            <span>
+              {statusLabel(selected.status)}
+              {selected.processId ? ` - pid ${selected.processId}` : ''}
+              {selected.currentTool ? ` - ${selected.currentTool}` : ''}
+            </span>
+            {!selected.terminalAttached ? <code className="attach-command">{selected.externalAttach}</code> : null}
+          </div>
             <span className="provider-tag" style={{ borderColor: selected.providerAccent, color: selected.providerAccent }}>
               {selected.providerTag}
             </span>
