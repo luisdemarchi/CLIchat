@@ -34,6 +34,7 @@ type StartResult struct {
 
 type SendInput struct {
 	Text string `json:"text"`
+	Data string `json:"data,omitempty"`
 }
 
 type Event struct {
@@ -104,6 +105,28 @@ func (c *Client) Start(ctx context.Context, input StartInput) (StartResult, erro
 
 func (c *Client) Send(ctx context.Context, sessionID string, text string) error {
 	body, err := json.Marshal(SendInput{Text: text})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/sessions/"+sessionID+"/send", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+
+	res, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return decodeError(res)
+	}
+	return nil
+}
+
+func (c *Client) SendData(ctx context.Context, sessionID string, data []byte) error {
+	body, err := json.Marshal(SendInput{Data: base64.StdEncoding.EncodeToString(data)})
 	if err != nil {
 		return err
 	}

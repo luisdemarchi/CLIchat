@@ -443,20 +443,22 @@ select {
 .terminal-panel {
   grid-row: 3;
   display: grid;
-  max-height: 260px;
+  height: min(36vh, 340px);
+  min-height: 220px;
   grid-template-rows: 38px minmax(0, 1fr);
-  border-top: 1px solid #252a25;
-  background: #101410;
-  color: #d9e6d6;
+  border-top: 1px solid #252934;
+  background: #0e1116;
+  color: #d6deeb;
 }
 
 .terminal-panel header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid #2d352d;
+  border-bottom: 1px solid #252934;
   padding: 0 12px;
-  color: #edf4ea;
+  color: #d6deeb;
+  background: #151922;
 }
 
 .terminal-panel header strong {
@@ -467,18 +469,23 @@ select {
   border: 0;
   border-radius: 6px;
   padding: 5px 8px;
-  color: #d9e6d6;
-  background: #263026;
+  color: #d6deeb;
+  background: #263142;
 }
 
-.terminal-panel pre {
+.xterm-shell {
   min-height: 0;
-  margin: 0;
-  overflow: auto;
-  padding: 12px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  overflow: hidden;
+  padding: 6px 8px;
+  background: #0e1116;
+}
+
+.xterm-shell .xterm {
+  height: 100%;
+}
+
+.xterm-shell .xterm-viewport {
+  background: #0e1116 !important;
 }
 
 .connect-panel {

@@ -40,6 +40,7 @@ type startResponse struct {
 
 type sendRequest struct {
 	Text string `json:"text"`
+	Data string `json:"data"`
 }
 
 func main() {
@@ -129,6 +130,19 @@ func (s *server) send(w http.ResponseWriter, r *http.Request, sessionID string) 
 	var input sendRequest
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if input.Data != "" {
+		decoded, err := base64.StdEncoding.DecodeString(input.Data)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid base64 data")
+			return
+		}
+		if err := s.manager.Send(sessionID, decoded); err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 		return
 	}
 	if err := s.manager.SendLine(sessionID, input.Text); err != nil {

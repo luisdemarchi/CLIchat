@@ -38,6 +38,11 @@ type TerminalActionInput struct {
 	Input     string `json:"input"`
 }
 
+type TerminalRawInput struct {
+	SessionID string `json:"sessionId"`
+	Data      string `json:"data"`
+}
+
 type Bootstrap struct {
 	Providers []provider.Provider `json:"providers"`
 	Sessions  []session.Session   `json:"sessions"`
@@ -164,6 +169,18 @@ func (a *App) RespondToPrompt(input TerminalActionInput) (session.Session, error
 	return updated, nil
 }
 
+func (a *App) SendTerminalInput(input TerminalRawInput) error {
+	if strings.TrimSpace(input.SessionID) == "" {
+		return errors.New("session id is required")
+	}
+	if input.Data == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return a.host.SendData(ctx, input.SessionID, []byte(input.Data))
+}
+
 func (a *App) SendMessage(input session.SendInput) (session.Session, error) {
 	text := strings.TrimSpace(input.Text)
 	if text == "" {
@@ -244,7 +261,6 @@ func (a *App) handleTerminalOutput(sessionID string, raw string) {
 	if ok && current.Status == session.Busy {
 		a.outputs.add(sessionID, raw, func(text string) {
 			if text == "" {
-				_, _ = a.registry.SetStatus(sessionID, session.Idle, "")
 				a.emitState()
 				return
 			}
@@ -517,10 +533,23 @@ func filterAssistantText(raw string, lastInput string) string {
 		if shouldDropTerminalLine(line, lastInput) {
 			continue
 		}
+		line = normalizeAssistantLine(line)
+		if line == "" || shouldDropTerminalLine(line, lastInput) {
+			continue
+		}
 		filtered = append(filtered, line)
 	}
 
 	return strings.TrimSpace(strings.Join(filtered, "\n"))
+}
+
+func normalizeAssistantLine(line string) string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimLeft(line, "●◦•>›❯$ ")
+	line = strings.ReplaceAll(line, "cavemanmode", "caveman mode")
+	line = strings.ReplaceAll(line, "Cavemanmode", "Caveman mode")
+	line = strings.TrimSpace(line)
+	return line
 }
 
 func shouldDropTerminalLine(line string, lastInput string) bool {
@@ -574,10 +603,12 @@ func shouldDropTerminalLine(line string, lastInput string) bool {
 		"claude code",
 		"claudecode",
 		"esc to interrupt",
-		"caveman mode",
-		"cavemanmode",
 		"baked for",
 		"effort",
+		"processing",
+		"processando",
+		"running sp hooks",
+		"sp hooks",
 	}
 	lower := strings.ToLower(line)
 	for _, drop := range drops {

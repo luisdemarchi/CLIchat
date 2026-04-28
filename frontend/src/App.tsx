@@ -1,6 +1,18 @@
+import '@xterm/xterm/css/xterm.css';
 import { Check, Circle, MonitorUp, Network, Plus, Send, TerminalSquare } from 'lucide-react';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { createChat, getBootstrap, onStateUpdate, openTerminal, respondToPrompt, selectSession, sendMessage } from './lib/api';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  createChat,
+  getBootstrap,
+  onStateUpdate,
+  openTerminal,
+  respondToPrompt,
+  selectSession,
+  sendMessage,
+  sendTerminalInput,
+} from './lib/api';
+import type { FitAddon as XtermFitAddon } from '@xterm/addon-fit';
+import type { Terminal as XtermTerminal } from '@xterm/xterm';
 import type { Bootstrap, ProviderId, Session } from './types';
 
 function statusLabel(status: Session['status']) {
@@ -14,6 +26,85 @@ function statusLabel(status: Session['status']) {
     default:
       return 'online';
   }
+}
+
+function TerminalPane({ output, sessionID }: { output: string; sessionID: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<XtermTerminal | null>(null);
+  const fitRef = useRef<XtermFitAddon | null>(null);
+  const sessionRef = useRef(sessionID);
+  const outputRef = useRef(output);
+
+  useEffect(() => {
+    sessionRef.current = sessionID;
+  }, [sessionID]);
+
+  useEffect(() => {
+    outputRef.current = output;
+  }, [output]);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    let disposed = false;
+    let terminal: XtermTerminal | null = null;
+    void Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')]).then(([xterm, fitAddon]) => {
+      if (disposed || !containerRef.current) return;
+      terminal = new xterm.Terminal({
+        convertEol: true,
+        cursorBlink: true,
+        fontFamily: 'Menlo, Monaco, "SFMono-Regular", Consolas, "Liberation Mono", monospace',
+        fontSize: 13,
+        lineHeight: 1.25,
+        scrollback: 5000,
+        theme: {
+          background: '#0e1116',
+          foreground: '#d6deeb',
+          cursor: '#e5e9f0',
+          selectionBackground: '#334155',
+          black: '#1f2937',
+          red: '#f87171',
+          green: '#86efac',
+          yellow: '#fde68a',
+          blue: '#93c5fd',
+          magenta: '#c4b5fd',
+          cyan: '#67e8f9',
+          white: '#f8fafc',
+        },
+      });
+      const fit = new fitAddon.FitAddon();
+      terminal.loadAddon(fit);
+      terminal.open(containerRef.current);
+      fit.fit();
+      terminal.onData((data) => {
+        void sendTerminalInput({ sessionId: sessionRef.current, data });
+      });
+      terminalRef.current = terminal;
+      fitRef.current = fit;
+      terminal.write(outputRef.current || 'Sem saida de terminal ainda.');
+      terminal.scrollToBottom();
+    });
+
+    const resize = () => fitRef.current?.fit();
+    window.addEventListener('resize', resize);
+    return () => {
+      disposed = true;
+      window.removeEventListener('resize', resize);
+      terminal?.dispose();
+      terminalRef.current = null;
+      fitRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.reset();
+    terminal.write(output || 'Sem saida de terminal ainda.');
+    terminal.scrollToBottom();
+    window.requestAnimationFrame(() => fitRef.current?.fit());
+  }, [output]);
+
+  return <div className="xterm-shell" ref={containerRef} />;
 }
 
 export function App() {
@@ -252,7 +343,7 @@ export function App() {
                   Ocultar
                 </button>
               </header>
-              <pre>{selected.terminalView || 'Sem saida de terminal ainda.'}</pre>
+              <TerminalPane sessionID={selected.id} output={selected.terminalOutput || selected.terminalView || ''} />
             </section>
           ) : null}
 
