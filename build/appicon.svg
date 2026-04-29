@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#25d366"/>
+      <stop offset="100%" stop-color="#128c7e"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8"/>
+      <feOffset dx="0" dy="6" result="offsetblur"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.25"/>
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" rx="232" ry="232" fill="url(#bg)"/>
+  <path d="M232 296
+           h560 a96 96 0 0 1 96 96
+           v300 a96 96 0 0 1 -96 96
+           h-272 l-148 124 v-124
+           h-140 a96 96 0 0 1 -96 -96
+           v-300 a96 96 0 0 1 96 -96 z"
+        fill="#ffffff" filter="url(#shadow)"/>
+  <text x="510" y="610"
+        font-family="-apple-system, SF Pro Display, Helvetica Neue, sans-serif"
+        font-size="240" font-weight="900"
+        fill="#075e54" text-anchor="middle"
+        letter-spacing="8">CLI</text>
+</svg>

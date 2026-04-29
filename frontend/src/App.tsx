@@ -1,4 +1,4 @@
-import { MessageSquarePlus, MoreVertical, Search, Send, TerminalSquare } from 'lucide-react';
+import { MessageSquarePlus, Moon, Paperclip, Search, Send, Sun, TerminalSquare } from 'lucide-react';
 import React, { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -6,8 +6,10 @@ import {
   createChat,
   getBootstrap,
   onStateUpdate,
+  pickFiles,
   respondToPrompt,
   selectSession,
+  sendFiles,
   sendMessage,
 } from './lib/api';
 import type { Bootstrap, Message, ProviderId, Session } from './types';
@@ -126,6 +128,34 @@ export function App() {
   const [terminalOpen, setTerminalOpen] = useState(true);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [lastSeen, setLastSeen] = useState<Record<string, number>>(() => readLastSeen());
+  const [theme, setTheme] = useState<'light' | 'dark'>(
+    () => (document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'),
+  );
+  const pickerWrapRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('clichat.theme', theme);
+  }, [theme]);
+
+  useEffect(() => {
+    if (!pickerOpen) return;
+    function onDocClick(ev: MouseEvent) {
+      if (!pickerWrapRef.current) return;
+      if (!pickerWrapRef.current.contains(ev.target as Node)) {
+        setPickerOpen(false);
+      }
+    }
+    function onEsc(ev: KeyboardEvent) {
+      if (ev.key === 'Escape') setPickerOpen(false);
+    }
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onEsc);
+    };
+  }, [pickerOpen]);
 
   useEffect(() => {
     getBootstrap().then((payload) => {
@@ -243,6 +273,22 @@ export function App() {
     }
   }
 
+  async function handleAttach() {
+    if (!selected) return;
+    if (!canSend) {
+      setError('Aguarde a resposta atual terminar.');
+      return;
+    }
+    setError('');
+    try {
+      const paths = await pickFiles();
+      if (!paths || paths.length === 0) return;
+      await sendFiles({ sessionId: selected.id, paths });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   if (!state) {
     return <main className="shell loading">Carregando…</main>;
   }
@@ -261,16 +307,46 @@ export function App() {
             </div>
           </div>
           <div className="actions">
+            <div className="actions-wrap" ref={pickerWrapRef}>
+              <button
+                className={`icon-btn ${pickerOpen ? 'active' : ''}`}
+                type="button"
+                title="Novo chat"
+                onClick={() => setPickerOpen((v) => !v)}
+              >
+                <MessageSquarePlus size={20} />
+              </button>
+              {pickerOpen ? (
+                <div className="provider-menu" role="menu">
+                  {state.providers.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      role="menuitem"
+                      disabled={!p.available}
+                      title={p.available ? p.description : `${p.name} CLI nao encontrado`}
+                      onClick={() => {
+                        setPickerOpen(false);
+                        void handleNewChat({ id: p.id, name: p.name });
+                      }}
+                    >
+                      <span className="logo" style={{ background: p.accent }}>
+                        <ProviderLogo providerId={p.id} size={14} />
+                      </span>
+                      <span className="label">{p.name}</span>
+                      {!p.available ? <span className="hint">indisponivel</span> : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
             <button
-              className={`icon-btn ${pickerOpen ? 'active' : ''}`}
+              className="icon-btn"
               type="button"
-              title="Novo chat"
-              onClick={() => setPickerOpen((v) => !v)}
+              title={theme === 'dark' ? 'Tema claro' : 'Tema escuro'}
+              onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
             >
-              <MessageSquarePlus size={20} />
-            </button>
-            <button className="icon-btn" type="button" title="Mais (em breve)" disabled>
-              <MoreVertical size={20} />
+              {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
             </button>
           </div>
         </header>
@@ -287,33 +363,6 @@ export function App() {
         </div>
 
         {error ? <div className="error-banner">{error}</div> : null}
-
-        {pickerOpen ? (
-          <div style={{ display: 'flex', gap: 8, padding: '0 12px 8px' }}>
-            {state.providers
-              .filter((p) => p.available)
-              .map((p) => (
-                <button
-                  className="icon-btn"
-                  key={p.id}
-                  type="button"
-                  style={{
-                    width: 'auto',
-                    height: 32,
-                    padding: '0 12px',
-                    borderRadius: 16,
-                    background: p.accent,
-                    color: '#ffffff',
-                    fontSize: 12,
-                    fontWeight: 600,
-                  }}
-                  onClick={() => void handleNewChat({ id: p.id, name: p.name })}
-                >
-                  + {p.name}
-                </button>
-              ))}
-          </div>
-        ) : null}
 
         <nav className="chat-list" aria-label="Conversas">
           {filteredSessions.length === 0 ? (
@@ -464,6 +513,15 @@ export function App() {
           })}
 
           <form className="composer" onSubmit={handleSubmit}>
+            <button
+              type="button"
+              className="send-btn"
+              title="Anexar arquivos"
+              onClick={() => void handleAttach()}
+              disabled={!canSend}
+            >
+              <Paperclip size={20} />
+            </button>
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}

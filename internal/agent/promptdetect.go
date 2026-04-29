@@ -11,12 +11,18 @@ const promptBufferLimit = 8 * 1024
 var (
 	ansiPromptPattern = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\a]*(?:\a|\x1b\\))`)
 	controlPattern    = regexp.MustCompile(`[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]`)
-	// numberedOption: only match items prefixed with the TUI cursor glyphs
-	// (❯ › >) — plain "1. foo / 2. bar" lists in regular markdown answers
-	// would otherwise be misclassified as a selectable menu.
-	numberedOption = regexp.MustCompile(`(?m)^\s*[❯›>]\s+([1-9])[.\)]\s+(.{1,80})$`)
-	// triggerPhrase: required textual hint that the TUI is asking for a choice.
-	menuTriggerPhrase = regexp.MustCompile(`(?i)\b(choose|select|pick|escolha|selecione|qual\s+(opção|opcao)|press\s+\d|enter\s+\d)\b`)
+	// numberedOption (relaxed): matches "1. label" or "  1. label" with the TUI
+	// cursor glyph (❯ › >) optional. Claude's TUI only marks the currently
+	// selected option with the glyph, so requiring it on every line drops the
+	// non-selected siblings. We still gate menu detection via cursorOption /
+	// menuTriggerPhrase to avoid catching ordinary numbered lists in replies.
+	numberedOption = regexp.MustCompile(`(?m)^\s*[❯›>]?\s*([1-9])[.\)]\s+(.{1,80})$`)
+	// cursorOption: at least one option must have the cursor glyph or the
+	// trigger phrase must be present — proves the buffer is a TUI menu and
+	// not a numbered list inside a normal markdown answer.
+	cursorOption = regexp.MustCompile(`(?m)^\s*[❯›>]\s+[1-9][.\)]\s+`)
+	// triggerPhrase: textual hints that the TUI is asking for a choice.
+	menuTriggerPhrase = regexp.MustCompile(`(?i)\b(choose|select|pick|escolha|selecione|qual\s+(opção|opcao)|press\s+\d|enter\s+\d|what\s+do\s+you\s+want\s+to\s+do|what\s+would\s+you\s+like\s+to\s+do|enter\s+to\s+confirm|esc\s+to\s+cancel)\b`)
 )
 
 // PromptDetector keeps a sliding buffer of cleaned terminal output per session
@@ -91,11 +97,12 @@ func stripAnsi(text string) string {
 }
 
 func DetectPrompt(buffer string) (string, []PendingAction, bool) {
-	// Only treat numbered lines as a menu when the surrounding text contains an
-	// explicit "choose / select / press N" trigger AND every option is prefixed
-	// with the cursor glyph (❯ › >). This avoids misclassifying numbered lists
-	// inside ordinary assistant answers (e.g. "3 fixes aplicados: 1. ... 2. ...").
-	if menuTriggerPhrase.MatchString(buffer) {
+	// Treat numbered lines as a menu when EITHER a trigger phrase is present
+	// OR at least one option has the TUI cursor glyph (❯ › >). Claude's TUI
+	// marks only the selected option with the glyph, so we cannot require it
+	// on every line. The combined gate (trigger OR any-cursor) keeps regular
+	// numbered lists inside markdown answers from being misclassified.
+	if menuTriggerPhrase.MatchString(buffer) || cursorOption.MatchString(buffer) {
 		matches := numberedOption.FindAllStringSubmatch(buffer, -1)
 		options := make([]PendingAction, 0, len(matches))
 		seen := make(map[string]bool)

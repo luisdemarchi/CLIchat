@@ -97,6 +97,11 @@ type TerminalRawInput struct {
 	Data      string `json:"data"`
 }
 
+type SendFilesInput struct {
+	SessionID string   `json:"sessionId"`
+	Paths     []string `json:"paths"`
+}
+
 func New() *App {
 	return &App{
 		host:       hostclient.New(""),
@@ -463,6 +468,90 @@ func (a *App) SendMessage(input SendInput) (Session, error) {
 	a.instances[updated.ID] = updated
 	a.mu.Unlock()
 	return a.toSession(updated), nil
+}
+
+// PickFiles opens a native multi-file picker and returns the selected absolute
+// paths. Empty slice when the user cancels.
+func (a *App) PickFiles() ([]string, error) {
+	if a.ctx == nil {
+		return nil, errors.New("wails context unavailable")
+	}
+	paths, err := wailsruntime.OpenMultipleFilesDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title: "Anexar arquivos",
+	})
+	if err != nil {
+		return nil, err
+	}
+	return paths, nil
+}
+
+// SendFiles delivers each file path to the underlying CLI as a separate input
+// line, in sequence (the TUI processes them one at a time). A single user
+// bubble groups all attached paths so the chat stays clean.
+func (a *App) SendFiles(input SendFilesInput) (Session, error) {
+	paths := make([]string, 0, len(input.Paths))
+	for _, p := range input.Paths {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			paths = append(paths, trimmed)
+		}
+	}
+	if len(paths) == 0 {
+		return Session{}, errors.New("no files selected")
+	}
+
+	a.mu.RLock()
+	inst, ok := a.instances[input.SessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return Session{}, errors.New("session not found")
+	}
+	if inst.Origin != agent.OriginInternal {
+		return a.toSession(inst), errors.New("anexar arquivo so funciona em sessoes internas")
+	}
+	if inst.Status == agent.StatusBusy {
+		return a.toSession(inst), errors.New("aguarde a resposta atual terminar")
+	}
+
+	bubble := "📎 Anexando " + pluralFiles(len(paths)) + ":\n"
+	for _, p := range paths {
+		bubble += "- " + p + "\n"
+	}
+	bubble = strings.TrimRight(bubble, "\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	updated, err := a.host.AppendMessage(ctx, inst.ID, agent.RoleUser, bubble)
+	if err != nil {
+		return a.toSession(inst), err
+	}
+	if _, err := a.host.SetStatus(ctx, inst.ID, agent.StatusBusy, ""); err != nil {
+		return a.toSession(updated), err
+	}
+
+	for i, p := range paths {
+		if err := a.host.SendText(ctx, inst.ID, "@"+p); err != nil {
+			_, _ = a.host.SetStatus(ctx, inst.ID, agent.StatusWaiting, "")
+			return a.toSession(updated), err
+		}
+		// give the TUI a moment to settle before pushing the next path
+		if i < len(paths)-1 {
+			time.Sleep(350 * time.Millisecond)
+		}
+	}
+
+	a.mu.Lock()
+	a.instances[updated.ID] = updated
+	a.mu.Unlock()
+	return a.toSession(updated), nil
+}
+
+func pluralFiles(n int) string {
+	if n == 1 {
+		return "1 arquivo"
+	}
+	return fmt.Sprintf("%d arquivos", n)
 }
 
 func (a *App) RespondToPrompt(input TerminalActionInput) (Session, error) {

@@ -9,6 +9,8 @@ declare global {
           SelectSession: (id: string) => Promise<Session>;
           CreateChat: (input: { providerId: ProviderId; title: string; cwd: string }) => Promise<Session>;
           SendMessage: (input: { sessionId: string; text: string }) => Promise<Session>;
+          SendFiles: (input: { sessionId: string; paths: string[] }) => Promise<Session>;
+          PickFiles: () => Promise<string[]>;
           RespondToPrompt: (input: { sessionId: string; actionId: string; input: string }) => Promise<Session>;
           SendTerminalInput: (input: { sessionId: string; data: string }) => Promise<void>;
           OpenTerminal: (input: { sessionId: string }) => Promise<string>;
@@ -99,6 +101,22 @@ export async function sendMessage(input: { sessionId: string; text: string }): P
     return api.SendMessage(input);
   }
   throw new Error('Backend Wails indisponivel. Abra pelo app desktop para enviar mensagens.');
+}
+
+export async function pickFiles(): Promise<string[]> {
+  const api = bridge();
+  if (api?.PickFiles) {
+    return api.PickFiles();
+  }
+  throw new Error('Backend Wails indisponivel. Abra pelo app desktop para anexar arquivos.');
+}
+
+export async function sendFiles(input: { sessionId: string; paths: string[] }): Promise<Session> {
+  const api = bridge();
+  if (api?.SendFiles) {
+    return api.SendFiles(input);
+  }
+  throw new Error('Backend Wails indisponivel. Abra pelo app desktop para enviar arquivos.');
 }
 
 export async function respondToPrompt(input: { sessionId: string; actionId: string; input: string }): Promise<Session> {
