@@ -77,7 +77,28 @@ Três binários:
 - **`agentctl`** (`cmd/agentctl`) — CLI usado pelos hooks do Claude Code
   (`agentctl hook session-start|stop|pre-tool-use|post-tool-use|user-prompt-submit`).
 
-## Instalar (terminal, um comando)
+## Pré-requisitos
+
+Instale uma vez no computador:
+
+| Ferramenta | Por quê | Instalação |
+|------------|---------|------------|
+| Go ≥ 1.25 | Compilar daemon + app Wails | `brew install go` (mac) / `sudo apt install golang` (Linux) |
+| Node ≥ 20 + pnpm | Compilar frontend React | `brew install node && npm i -g pnpm` |
+| Wails v2.12 CLI | Empacotar app desktop | `go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0` (o instalador roda automaticamente se faltar) |
+| Xcode CLT (macOS) | Cgo / WebKit | `xcode-select --install` |
+| `claude` CLI | Provedor Claude Code | https://docs.claude.com/claude-code |
+| `codex` CLI (opcional) | Provedor OpenAI Codex | `npm i -g @openai/codex` |
+
+Garanta que `~/.local/bin` está no seu `$PATH`:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+## Instalar
+
+Um comando:
 
 ```bash
 git clone https://github.com/luisdemarchi/CLIchat.git
@@ -85,16 +106,94 @@ cd CLIchat
 ./scripts/install.sh
 ```
 
-O script:
+O instalador faz, em ordem:
 
-1. compila `agent-host` e `agentctl` em `~/.local/bin/`,
-2. instala os hooks no `~/.claude/settings.json`,
-3. compila o app Wails (`CLIchat.app`) e copia pra `/Applications/`
-   no macOS ou `~/.local/share/clichat/` no Linux,
-4. registra o daemon no launchd (macOS) ou systemd-user (Linux) pra
-   subir junto com o login.
+1. **Compila `agent-host` e `agentctl`** em `~/.local/bin/`.
+2. **Instala os hooks do Claude Code** em `~/.claude/settings.json`
+   (`SessionStart`, `Stop`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`)
+   pra que toda sessão Claude — mesmo as abertas fora do app — reporte
+   status pra CLIchat.
+3. **Compila o app desktop Wails** e copia pra `/Applications/CLIchat.app`
+   (macOS) ou `~/.local/share/clichat/CLIchat` (Linux).
+4. **Registra o daemon como serviço** pra subir no login:
+   - macOS: `~/Library/LaunchAgents/com.clichat.host.plist` (launchd)
+   - Linux: `~/.config/systemd/user/clichat.service` (systemd user)
 
-Depois, abra `CLIchat.app` e clique em `+ Novo chat` → Claude/Codex.
+Re-rodar `./scripts/install.sh` é idempotente.
+
+## Como usar
+
+### 1. Abrir o app
+
+- macOS: abra `Aplicativos` e dê dois cliques em **CLIchat**.
+- Linux: rode `~/.local/share/clichat/CLIchat`.
+
+Na primeira abertura o daemon pode levar alguns segundos pra registrar.
+O header fica *"agent-host online."* assim que estiver pronto.
+
+### 2. Iniciar uma nova conversa
+
+Clique no ícone **`+`** no topo da sidebar e escolha o provedor (Claude
+ou Codex). O CLIchat:
+
+- cria uma sessão interna,
+- spawna o CLI escolhido num PTY oculto,
+- aguarda a TUI inicializar (~1,5s de grace),
+- mostra o chat no topo da sidebar com o logo do provedor no avatar.
+
+### 3. Conversar
+
+Digite no rodapé e aperte Enter. O CLIchat envia o texto pro PTY com a
+sequência Focus-In + texto plain + `\r` (funciona em Claude, Codex e
+Gemini). O balão aparece à direita; a resposta entra "digitando" conforme
+o LLM responde.
+
+Enquanto o agente trabalha, a **pílula de status** acima do rodapé
+mostra a ferramenta atual (Bash / Read / Write / Web / Agent /
+pensando…). Clique na pílula pra abrir/fechar o terminal embutido e ver
+a TUI bruta ao vivo.
+
+### 4. Acompanhar sessões Claude abertas fora do app
+
+Abra outro terminal e rode `claude` em qualquer projeto. O hook
+`SessionStart` avisa o CLIchat: a sessão aparece como chat na sidebar.
+O watcher de transcript espelha cada resposta no balão. Você pode
+continuar trabalhando no terminal — nesse caso o CLIchat é só um espelho
+de leitura.
+
+### 5. Fechar e reabrir sem perder contexto
+
+- O daemon (`agent-host`) continua rodando em background, então os PTYs
+  ficam vivos quando você fecha o app.
+- Se você matar o daemon de fato, na próxima abertura o CLIchat
+  re-spawna cada chat interno com `claude --resume <session-id>` (Claude)
+  ou `codex resume --last` (Codex), então a conversa continua.
+
+### 6. Atalhos no terminal
+
+```bash
+agentctl list            # lista as conversas que o daemon conhece
+agentctl install-hooks   # reescreve os hooks do Claude Code (idempotente)
+agentctl uninstall-hooks # remove só os hooks
+agent-host serve         # roda o daemon manualmente (debug)
+```
+
+Estado em `~/.clichat/state.json`. Logs em `~/.clichat/logs/`.
+
+## Troubleshooting
+
+- **Pílula de status não aparece** → `~/.claude/settings.json` está sem
+  os hooks gerenciados. Rode `agentctl install-hooks`.
+- **Sessão Codex com balões vazios** → o Codex grava em
+  `~/.codex/sessions`; o CLIchat só importa rollouts com até ~5 min de
+  modificação. Mande mais um turno e ele pega automaticamente.
+- **"MCP server failed" no boot do Claude** → o Claude está em corrida com
+  o daemon. Confirme em `~/.claude/settings.json` que o bloco MCP aponta
+  pra `http://127.0.0.1:47657/mcp`. O daemon precisa estar rodando antes
+  do Claude — confira `launchctl list | grep clichat` (macOS) ou
+  `systemctl --user status clichat` (Linux).
+- **Ícone do app é o "W" padrão do Wails** → rode `wails build -clean`
+  após dar pull do `build/appicon.png` mais novo.
 
 ## Desenvolver
 
