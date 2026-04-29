@@ -1,7 +1,7 @@
 export type ProviderId = 'claude' | 'gemini' | 'codex';
 export type SessionStatus = 'idle' | 'busy' | 'waiting' | 'offline';
+export type SessionOrigin = 'internal' | 'external';
 export type MessageRole = 'user' | 'assistant' | 'system';
-export type MessageType = 'text' | 'audio' | 'image';
 
 export interface Provider {
   id: ProviderId;
@@ -18,7 +18,6 @@ export interface Provider {
 export interface Message {
   id: string;
   role: MessageRole;
-  type: MessageType;
   text: string;
   createdAt: string;
 }
@@ -32,25 +31,27 @@ export interface PendingAction {
 export interface Session {
   id: string;
   title: string;
-  providerId: ProviderId;
-  providerSessionId: string;
+  topic?: string;
+  providerId: string;
   providerTag: string;
   providerAccent: string;
+  origin: SessionOrigin;
   status: SessionStatus;
   cwd?: string;
   avatarLabel: string;
   lastMessage: string;
   currentTool?: string;
   processId?: number;
+  tty?: string;
+  claudeSessionId?: string;
   externalAttach: string;
   createdAt: string;
   updatedAt: string;
   messages: Message[];
-  terminalOutput: string;
-  terminalView: string;
   pendingQuestion?: string;
   pendingActions: PendingAction[];
   terminalAttached: boolean;
+  transcriptPath?: string;
 }
 
 export interface MirrorStatus {

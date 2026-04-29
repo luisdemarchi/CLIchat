@@ -1,13 +1,20 @@
 {
   "$schema": "https://wails.io/schemas/config.v2.json",
-  "name": "agent-chat-local",
-  "outputfilename": "AgentChatLocal",
+  "name": "clichat",
+  "outputfilename": "CLIchat",
   "frontend:install": "pnpm install",
   "frontend:build": "pnpm run build",
   "frontend:dev:watcher": "pnpm run dev",
   "frontend:dev:serverUrl": "auto",
+  "info": {
+    "companyName": "Luís De Marchi",
+    "productName": "CLIchat",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright © 2026 Luís De Marchi (@luisdemarchi)",
+    "comments": "WhatsApp-style desktop chat for Claude Code and Codex CLIs. Projeto open source feito no Brasil."
+  },
   "author": {
-    "name": "Luis",
-    "email": ""
+    "name": "Luís De Marchi",
+    "email": "luis@luisdemarchi.com.br"
   }
 }

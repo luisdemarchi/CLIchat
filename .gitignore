@@ -19,5 +19,16 @@ coverage.out
 /frontend/.vite/
 /frontend/package.json.md5
 
-# Local runtime
+# Local runtime / state (never commit user data or local logs)
 /.agent-chat-local/
+/.clichat/
+host_test.log
+
+# Top-level dev binaries (built by `go build` from repo root)
+/agent-host
+/agentctl
+
+# Author's local Citadel / Claude Code harness — not part of CLIchat
+/.planning/
+/.citadel/
+/.claude/

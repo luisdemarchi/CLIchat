@@ -1,119 +1,131 @@
-import '@xterm/xterm/css/xterm.css';
-import { Check, Circle, MonitorUp, Network, Plus, Send, TerminalSquare } from 'lucide-react';
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { MessageSquarePlus, MoreVertical, Search, Send, TerminalSquare } from 'lucide-react';
+import React, { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   createChat,
   getBootstrap,
   onStateUpdate,
-  openTerminal,
   respondToPrompt,
   selectSession,
   sendMessage,
-  sendTerminalInput,
 } from './lib/api';
-import type { FitAddon as XtermFitAddon } from '@xterm/addon-fit';
-import type { Terminal as XtermTerminal } from '@xterm/xterm';
-import type { Bootstrap, ProviderId, Session } from './types';
+import type { Bootstrap, Message, ProviderId, Session } from './types';
+import { TerminalPane } from './components/TerminalPane';
+import { ProviderLogo } from './components/ProviderLogo';
+import { describeStatus } from './lib/status';
 
-function statusLabel(status: Session['status']) {
-  switch (status) {
-    case 'busy':
-      return 'trabalhando';
-    case 'waiting':
-      return 'aguardando';
-    case 'offline':
-      return 'offline';
-    default:
-      return 'online';
+function formatTime(iso: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function meAvatarLabel(name: string): string {
+  const parts = name.trim().split(/\s+/);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].charAt(0).toUpperCase();
+  return (parts[0].charAt(0) + parts[1].charAt(0)).toUpperCase();
+}
+
+interface MessageBubbleProps {
+  message: Message;
+  isFirstOfRun: boolean;
+}
+
+// Type-out animation. When a brand-new assistant message arrives we reveal it
+// progressively (~80 chars/frame) so long replies do not appear as a wall of
+// text after a long wait. Messages restored from history skip the animation.
+function useTypewriter(target: string, animate: boolean): string {
+  const [shown, setShown] = useState<string>(animate ? '' : target);
+  const indexRef = useRef(0);
+  useEffect(() => {
+    if (!animate) {
+      setShown(target);
+      return;
+    }
+    indexRef.current = 0;
+    setShown('');
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      const next = Math.min(target.length, indexRef.current + 80);
+      setShown(target.slice(0, next));
+      indexRef.current = next;
+      if (next < target.length) {
+        requestAnimationFrame(tick);
+      }
+    };
+    const id = requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(id);
+    };
+  }, [target, animate]);
+  return shown;
+}
+
+function MessageBubble({ message, isFirstOfRun }: MessageBubbleProps) {
+  // Track whether this bubble was newly mounted (not a restored history item).
+  const mountedAtRef = useRef<number>(Date.now());
+  const messageAge = Date.now() - new Date(message.createdAt).getTime();
+  // Animate only if mount is recent AND the message is recent (within 5s).
+  const animate = messageAge < 5000 && Date.now() - mountedAtRef.current < 200;
+  const visibleText = useTypewriter(message.text, animate && message.role === 'assistant');
+
+  if (message.role === 'system') {
+    return (
+      <article className="bubble system">
+        <p>{message.text}</p>
+      </article>
+    );
+  }
+  const isAssistant = message.role === 'assistant';
+  return (
+    <article className={`bubble ${message.role} ${isFirstOfRun ? 'first' : ''}`}>
+      <div className="bubble-content">
+        {isAssistant ? (
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{visibleText}</ReactMarkdown>
+        ) : (
+          <p>{message.text}</p>
+        )}
+      </div>
+      <span className="meta">{formatTime(message.createdAt)}</span>
+    </article>
+  );
+}
+
+const LAST_SEEN_KEY = 'clichat:lastSeen';
+
+function readLastSeen(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(LAST_SEEN_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed ? parsed : {};
+  } catch {
+    return {};
   }
 }
 
-function TerminalPane({ output, sessionID }: { output: string; sessionID: string }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const terminalRef = useRef<XtermTerminal | null>(null);
-  const fitRef = useRef<XtermFitAddon | null>(null);
-  const sessionRef = useRef(sessionID);
-  const outputRef = useRef(output);
-
-  useEffect(() => {
-    sessionRef.current = sessionID;
-  }, [sessionID]);
-
-  useEffect(() => {
-    outputRef.current = output;
-  }, [output]);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    let disposed = false;
-    let terminal: XtermTerminal | null = null;
-    void Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')]).then(([xterm, fitAddon]) => {
-      if (disposed || !containerRef.current) return;
-      terminal = new xterm.Terminal({
-        convertEol: true,
-        cursorBlink: true,
-        fontFamily: 'Menlo, Monaco, "SFMono-Regular", Consolas, "Liberation Mono", monospace',
-        fontSize: 13,
-        lineHeight: 1.25,
-        scrollback: 5000,
-        theme: {
-          background: '#0e1116',
-          foreground: '#d6deeb',
-          cursor: '#e5e9f0',
-          selectionBackground: '#334155',
-          black: '#1f2937',
-          red: '#f87171',
-          green: '#86efac',
-          yellow: '#fde68a',
-          blue: '#93c5fd',
-          magenta: '#c4b5fd',
-          cyan: '#67e8f9',
-          white: '#f8fafc',
-        },
-      });
-      const fit = new fitAddon.FitAddon();
-      terminal.loadAddon(fit);
-      terminal.open(containerRef.current);
-      fit.fit();
-      terminal.onData((data) => {
-        void sendTerminalInput({ sessionId: sessionRef.current, data });
-      });
-      terminalRef.current = terminal;
-      fitRef.current = fit;
-      terminal.write(outputRef.current || 'Sem saida de terminal ainda.');
-      terminal.scrollToBottom();
-    });
-
-    const resize = () => fitRef.current?.fit();
-    window.addEventListener('resize', resize);
-    return () => {
-      disposed = true;
-      window.removeEventListener('resize', resize);
-      terminal?.dispose();
-      terminalRef.current = null;
-      fitRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal) return;
-    terminal.reset();
-    terminal.write(output || 'Sem saida de terminal ainda.');
-    terminal.scrollToBottom();
-    window.requestAnimationFrame(() => fitRef.current?.fit());
-  }, [output]);
-
-  return <div className="xterm-shell" ref={containerRef} />;
+function writeLastSeen(map: Record<string, number>) {
+  try {
+    localStorage.setItem(LAST_SEEN_KEY, JSON.stringify(map));
+  } catch {
+    // localStorage may be unavailable
+  }
 }
 
 export function App() {
   const [state, setState] = useState<Bootstrap | null>(null);
   const [selectedID, setSelectedID] = useState('');
   const [draft, setDraft] = useState('');
-  const [newProvider, setNewProvider] = useState<ProviderId>('claude');
+  const [search, setSearch] = useState('');
   const [error, setError] = useState('');
-  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(true);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [lastSeen, setLastSeen] = useState<Record<string, number>>(() => readLastSeen());
 
   useEffect(() => {
     getBootstrap().then((payload) => {
@@ -126,22 +138,72 @@ export function App() {
     });
   }, []);
 
+  const filteredSessions = useMemo(() => {
+    if (!state) return [];
+    const query = search.trim().toLowerCase();
+    if (!query) return state.sessions;
+    return state.sessions.filter((s) =>
+      [s.title, s.lastMessage, s.topic ?? ''].some((field) => field.toLowerCase().includes(query)),
+    );
+  }, [state, search]);
+
   const selected = useMemo(() => {
     if (!state) return undefined;
-    return state.sessions.find((session) => session.id === selectedID) ?? state.selected ?? state.sessions[0];
+    return state.sessions.find((s) => s.id === selectedID) ?? state.selected ?? state.sessions[0];
   }, [selectedID, state]);
-  const canSend = Boolean(selected?.terminalAttached && selected.status !== 'busy');
+
+  const selectedStatus = useMemo(
+    () => (selected ? describeStatus(selected) : describeStatus({ status: 'offline' } as Session)),
+    [selected],
+  );
+  const SelectedIcon = selectedStatus.Icon;
+
+  const canSend = Boolean(selected && selected.status !== 'busy' && selected.terminalAttached);
+
+  const messagesRef = useRef<HTMLDivElement | null>(null);
+  const lastMessageCount = (selected?.messages ?? []).length;
+  useEffect(() => {
+    const node = messagesRef.current;
+    if (!node) return;
+    requestAnimationFrame(() => {
+      node.scrollTop = node.scrollHeight;
+    });
+  }, [selectedID, lastMessageCount, selected?.lastMessage, selected?.status]);
+
+  // Mark the open chat as fully read whenever its message list grows.
+  useEffect(() => {
+    if (!selected) return;
+    setLastSeen((prev) => {
+      const current = prev[selected.id] ?? 0;
+      const total = (selected.messages ?? []).length;
+      if (current >= total) return prev;
+      const next = { ...prev, [selected.id]: total };
+      writeLastSeen(next);
+      return next;
+    });
+  }, [selected, lastMessageCount]);
+
+  function unreadCount(s: Session): number {
+    if (s.id === selectedID) return 0;
+    const total = (s.messages ?? []).length;
+    const seen = lastSeen[s.id] ?? 0;
+    const unread = total - seen;
+    return unread > 0 ? unread : 0;
+  }
 
   async function handleSelect(session: Session) {
     setSelectedID(session.id);
-    const next = await selectSession(session.id);
-    setState((current) => current && { ...current, selected: next });
+    try {
+      await selectSession(session.id);
+    } catch {
+      // optimistic
+    }
   }
 
-  async function handleNewChat() {
+  async function handleNewChat(provider: { id: ProviderId; name: string }) {
     if (!state) return;
+    setPickerOpen(false);
     setError('');
-    const provider = state.providers.find((item) => item.id === newProvider) ?? state.providers[0];
     try {
       const created = await createChat({
         providerId: provider.id,
@@ -149,13 +211,6 @@ export function App() {
         cwd: '',
       });
       setSelectedID(created.id);
-      setState((current) =>
-        current && {
-          ...current,
-          sessions: [created, ...current.sessions.filter((session) => session.id !== created.id)],
-          selected: created,
-        },
-      );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -164,35 +219,15 @@ export function App() {
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!selected || draft.trim() === '') return;
-    if (!selected.terminalAttached) {
-      setError('Conecte o terminal externo antes de enviar mensagens.');
+    if (!canSend) {
+      setError('Aguarde a resposta atual terminar.');
       return;
     }
-
     const text = draft.trim();
     setDraft('');
     setError('');
     try {
-      const updated = await sendMessage({ sessionId: selected.id, text });
-      setState((current) => {
-        if (!current) return current;
-        return {
-          ...current,
-          sessions: current.sessions.map((session) => (session.id === updated.id ? updated : session)),
-          selected: updated,
-        };
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  async function handleOpenTerminal() {
-    if (!selected) return;
-    setError('');
-    try {
-      const command = await openTerminal({ sessionId: selected.id });
-      setError(`Terminal externo aberto. Comando copiado: ${command}`);
+      await sendMessage({ sessionId: selected.id, text });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -202,172 +237,253 @@ export function App() {
     if (!selected) return;
     setError('');
     try {
-      const updated = await respondToPrompt({ sessionId: selected.id, actionId: action.id, input: action.input });
-      setState((current) => {
-        if (!current) return current;
-        return {
-          ...current,
-          sessions: current.sessions.map((session) => (session.id === updated.id ? updated : session)),
-          selected: updated,
-        };
-      });
+      await respondToPrompt({ sessionId: selected.id, actionId: action.id, input: action.input });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   }
 
   if (!state) {
-    return <main className="shell loading">Carregando</main>;
+    return <main className="shell loading">Carregando…</main>;
   }
+
+  const messages = selected?.messages ?? [];
 
   return (
     <main className="shell">
       <aside className="sidebar">
-        <header className="profile">
-          <div className="profile-photo">LC</div>
-          <div>
-            <h1>Agent Chat Local</h1>
-            <p>{state.mirror.note}</p>
+        <header className="sidebar-header">
+          <div className="me">
+            <div className="me-avatar">{meAvatarLabel('Local Chat')}</div>
+            <div>
+              <strong>CLIchat</strong>
+              <small>{state.mirror.note}</small>
+            </div>
           </div>
-          <span className="network-pill" title="Espelhamento local/Tailscale">
-            <Network size={16} />
-          </span>
+          <div className="actions">
+            <button
+              className={`icon-btn ${pickerOpen ? 'active' : ''}`}
+              type="button"
+              title="Novo chat"
+              onClick={() => setPickerOpen((v) => !v)}
+            >
+              <MessageSquarePlus size={20} />
+            </button>
+            <button className="icon-btn" type="button" title="Mais (em breve)" disabled>
+              <MoreVertical size={20} />
+            </button>
+          </div>
         </header>
 
-        <section className="new-chat">
-          <select value={newProvider} onChange={(event) => setNewProvider(event.target.value as ProviderId)}>
-            {state.providers.map((provider) => (
-              <option key={provider.id} value={provider.id}>
-                {provider.name}
-              </option>
-            ))}
-          </select>
-          <button type="button" onClick={handleNewChat} title="Novo chat">
-            <Plus size={18} />
-          </button>
-        </section>
+        <div className="search-row">
+          <div className="field">
+            <Search size={16} />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Pesquisar"
+            />
+          </div>
+        </div>
+
         {error ? <div className="error-banner">{error}</div> : null}
 
-        <section className="status-strip" aria-label="Status">
-          {state.providers.map((provider) => (
-            <div className="status-photo" key={provider.id} style={{ borderColor: provider.accent }}>
-              <span>{provider.tag.slice(0, 2)}</span>
-              <small>{provider.available ? <Check size={12} /> : <Circle size={12} />}</small>
-            </div>
-          ))}
-        </section>
+        {pickerOpen ? (
+          <div style={{ display: 'flex', gap: 8, padding: '0 12px 8px' }}>
+            {state.providers
+              .filter((p) => p.available)
+              .map((p) => (
+                <button
+                  className="icon-btn"
+                  key={p.id}
+                  type="button"
+                  style={{
+                    width: 'auto',
+                    height: 32,
+                    padding: '0 12px',
+                    borderRadius: 16,
+                    background: p.accent,
+                    color: '#ffffff',
+                    fontSize: 12,
+                    fontWeight: 600,
+                  }}
+                  onClick={() => void handleNewChat({ id: p.id, name: p.name })}
+                >
+                  + {p.name}
+                </button>
+              ))}
+          </div>
+        ) : null}
 
         <nav className="chat-list" aria-label="Conversas">
-          {state.sessions.map((session) => (
-            <button
-              className={`chat-row ${session.id === selected?.id ? 'active' : ''}`}
-              key={session.id}
-              type="button"
-              onClick={() => void handleSelect(session)}
-            >
-              <span className="avatar" style={{ background: session.providerAccent }}>
-                {session.avatarLabel}
-              </span>
-              <span className="chat-copy">
-                <strong>{session.title}</strong>
-                <span>{session.lastMessage}</span>
-              </span>
-              <span className={`presence ${session.status}`}>{statusLabel(session.status)}</span>
-            </button>
-          ))}
+          {filteredSessions.length === 0 ? (
+            <div className="empty-list">
+              <p>Nenhum chat ainda.</p>
+              <small>
+                Clique no ícone de novo chat acima e escolha o provedor para iniciar uma conversa
+                local.
+              </small>
+            </div>
+          ) : null}
+          {filteredSessions.map((session) => {
+            const info = describeStatus(session);
+            const RowIcon = info.Icon;
+            const unread = unreadCount(session);
+            return (
+              <button
+                className={`chat-row ${session.id === selected?.id ? 'active' : ''} ${unread > 0 ? 'unread' : ''}`}
+                key={session.id}
+                type="button"
+                onClick={() => void handleSelect(session)}
+              >
+                <span
+                  className={`row-avatar status-${info.className ?? ''} ${info.spin ? 'spin' : ''}`}
+                  style={
+                    {
+                      background: session.providerAccent + '22',
+                      color: session.providerAccent,
+                      ['--provider-accent' as never]: session.providerAccent,
+                    } as React.CSSProperties
+                  }
+                >
+                  <RowIcon size={22} />
+                  <span className="badge-emoji">
+                    <ProviderLogo providerId={session.providerId} size={13} />
+                  </span>
+                </span>
+                <span className="row-body">
+                  <span className="row-line-1">
+                    <span className="row-name">{session.topic || session.title}</span>
+                    <span className="row-time">{formatTime(session.updatedAt)}</span>
+                  </span>
+                  <span className="row-line-2">
+                    <span className="row-snippet">{session.lastMessage || session.title || '—'}</span>
+                    {unread > 0 ? (
+                      <span className="unread-badge" title={`${unread} mensagem${unread === 1 ? '' : 'ns'} não lida${unread === 1 ? '' : 's'}`}>
+                        {unread > 99 ? '99+' : unread}
+                      </span>
+                    ) : null}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
         </nav>
       </aside>
 
       {selected ? (
         <section className="conversation">
           <header className="conversation-header">
-            <div className="avatar large" style={{ background: selected.providerAccent }}>
-              {selected.avatarLabel}
+            <div
+              className={`header-avatar status-${selectedStatus.className ?? ''} ${selectedStatus.spin ? 'spin' : ''}`}
+              style={{ background: selected.providerAccent + '22', color: selected.providerAccent }}
+            >
+              <SelectedIcon size={22} />
             </div>
-            <div className="title-block">
-              <strong>{selected.title}</strong>
-            <span>
-              {statusLabel(selected.status)}
-              {selected.processId ? ` - pid ${selected.processId}` : ''}
-              {selected.currentTool ? ` - ${selected.currentTool}` : ''}
-            </span>
-            {!selected.terminalAttached ? <code className="attach-command">{selected.externalAttach}</code> : null}
-          </div>
-            <span className="provider-tag" style={{ borderColor: selected.providerAccent, color: selected.providerAccent }}>
-              {selected.providerTag}
-            </span>
-            <button type="button" className="icon-button" title="Abrir terminal externo" onClick={() => void handleOpenTerminal()}>
-              <MonitorUp size={18} />
-            </button>
-            <button type="button" className="icon-button" title="Mostrar terminal" onClick={() => setTerminalOpen((open) => !open)}>
-              <TerminalSquare size={18} />
-            </button>
+            <div className="header-info">
+              <span className="header-name">{selected.topic || selected.title}</span>
+              {selected.topic && selected.title !== selected.topic ? (
+                <span className="header-topic">{selected.title}</span>
+              ) : null}
+              <span className="header-meta">
+                {selectedStatus.label}
+                {selected.cwd ? ` · ${selected.cwd}` : ''}
+              </span>
+            </div>
+            <div className="header-actions">
+              <button
+                type="button"
+                className={`icon-btn ${terminalOpen ? 'active' : ''}`}
+                title={terminalOpen ? 'Esconder terminal' : 'Mostrar terminal'}
+                onClick={() => setTerminalOpen((v) => !v)}
+              >
+                <TerminalSquare size={20} />
+              </button>
+            </div>
           </header>
 
-          <div className="messages">
-            {!selected.terminalAttached ? (
-              <section className="connect-panel">
-                <strong>Terminal externo necessario</strong>
-                <span>Copie e rode este comando em um terminal para conectar o Claude com seguranca.</span>
-                <code>{selected.externalAttach}</code>
-                <button type="button" onClick={() => void handleOpenTerminal()}>
-                  Copiar comando
-                </button>
-              </section>
-            ) : null}
-            {(selected.messages ?? []).map((message) => (
-              <article className={`bubble ${message.role}`} key={message.id}>
-                <p>{message.text}</p>
-                <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+          <div className="messages" ref={messagesRef}>
+            {messages.length === 0 ? (
+              <article className="bubble system">
+                <p>Sem mensagens ainda. Digite abaixo para começar.</p>
               </article>
-            ))}
+            ) : null}
+            {messages.map((message, index) => {
+              const prev = index > 0 ? messages[index - 1] : undefined;
+              const isFirstOfRun = !prev || prev.role !== message.role;
+              return <MessageBubble key={message.id} message={message} isFirstOfRun={isFirstOfRun} />;
+            })}
             {(selected.pendingActions ?? []).length > 0 ? (
               <article className="prompt-card">
-                <p>{selected.pendingQuestion || 'O terminal esta aguardando confirmacao.'}</p>
-                <div>
-                  {(selected.pendingActions ?? []).map((action) => (
-                    <button type="button" key={action.id} onClick={() => void handlePromptAction(action)}>
-                      {action.label}
-                    </button>
-                  ))}
+                <p className="prompt-question">
+                  {selected.pendingQuestion || 'O terminal está aguardando uma escolha.'}
+                </p>
+                <div className="prompt-options">
+                  {(selected.pendingActions ?? []).map((action) => {
+                    // Split "1. label" into key + label so we can render both nicely.
+                    const m = /^(\S+)\.\s+(.+)$/.exec(action.label);
+                    const optKey = m ? m[1] : action.id;
+                    const optText = m ? m[2] : action.label;
+                    return (
+                      <button type="button" key={action.id} onClick={() => void handlePromptAction(action)}>
+                        <span className="opt-key">{optKey}</span>
+                        <span className="opt-label">{optText}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               </article>
             ) : null}
+            {selected.status !== 'idle' && selected.status !== 'offline' ? (
+              <button
+                type="button"
+                className={`status-pill clickable ${selectedStatus.spin ? 'spin-icon' : ''} status-${selectedStatus.className ?? ''}`}
+                title={terminalOpen ? 'Esconder terminal' : 'Mostrar terminal pra ver detalhes'}
+                onClick={() => setTerminalOpen(true)}
+              >
+                <SelectedIcon size={14} />
+                <span>{selectedStatus.label}…</span>
+              </button>
+            ) : null}
           </div>
 
-          {terminalOpen ? (
-            <section className="terminal-panel">
-              <header>
-                <strong>Terminal</strong>
-                <button type="button" onClick={() => setTerminalOpen(false)}>
-                  Ocultar
-                </button>
-              </header>
-              <TerminalPane sessionID={selected.id} output={selected.terminalOutput || selected.terminalView || ''} />
-            </section>
-          ) : null}
+          {state.sessions.map((s) => {
+            const isThisSelected = s.id === selected.id;
+            const visible = isThisSelected && terminalOpen;
+            return (
+              <section key={s.id} className={`terminal-panel ${visible ? '' : 'hidden'}`}>
+                <header>
+                  <strong>Terminal · {s.providerTag}</strong>
+                  <button type="button" onClick={() => setTerminalOpen(false)}>
+                    Ocultar
+                  </button>
+                </header>
+                <TerminalPane sessionID={s.id} visible={visible} />
+              </section>
+            );
+          })}
 
           <form className="composer" onSubmit={handleSubmit}>
-            <span className="terminal-indicator" title={selected.externalAttach}>
-              <TerminalSquare size={18} />
-            </span>
             <input
               value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder={`Mensagem para ${selected.providerTag}`}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="Mensagem"
               disabled={!canSend}
             />
-            <button type="submit" title="Enviar" disabled={!canSend}>
-              <Send size={18} />
+            <button type="submit" className="send-btn" title="Enviar" disabled={!canSend}>
+              <Send size={20} />
             </button>
           </form>
         </section>
       ) : (
         <section className="empty-conversation">
-          <div>
-            <TerminalSquare size={34} />
-            <strong>Escolha um provedor e inicie um chat.</strong>
-            <span>O app vai abrir o CLI real em um terminal oculto e mostrar a saida aqui.</span>
+          <div className="pad">
+            <TerminalSquare size={120} strokeWidth={1} />
+            <strong>CLIchat</strong>
+            <span>
+              Clique no ícone de novo chat para iniciar uma conversa com Claude, Gemini ou Codex.
+              Cada chat tem seu próprio terminal embutido com a TUI real do CLI.
+            </span>
           </div>
         </section>
       )}

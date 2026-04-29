@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"agent-chat-local/internal/terminal"
+	"clichat/internal/terminal"
 )
 
 type Status struct {

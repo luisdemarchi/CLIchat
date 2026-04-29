@@ -5,16 +5,19 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"agent-chat-local/internal/mirror"
-	"agent-chat-local/internal/terminal"
+	"clichat/internal/agent"
+	"clichat/internal/mirror"
+	"clichat/internal/terminal"
 )
 
 const (
@@ -25,6 +28,9 @@ const (
 type server struct {
 	manager   *terminal.Manager
 	mirror    *mirror.Server
+	store     *agent.Store
+	watcher   *agent.TranscriptWatcher
+	prompts   *agent.PromptDetector
 	eventsMu  sync.Mutex
 	nextSubID int
 	eventSubs map[string]map[int]chan hostEvent
@@ -35,16 +41,310 @@ type hostEvent struct {
 	Data []byte
 }
 
-type startRequest struct {
-	SessionID string   `json:"sessionId"`
-	Command   string   `json:"command"`
-	Args      []string `json:"args"`
-	CWD       string   `json:"cwd"`
+func main() {
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: agent-host serve [--http addr] [--attach addr] [--state path]")
+	}
+
+	if len(os.Args) < 2 || os.Args[1] != "serve" {
+		flag.Usage()
+		os.Exit(2)
+	}
+
+	args := flag.NewFlagSet("serve", flag.ExitOnError)
+	httpAddr := args.String("http", defaultHTTPAddress, "HTTP listen address")
+	attachAddr := args.String("attach", defaultTTYAddress, "TTY attach address")
+	statePath := args.String("state", defaultStatePath(), "Path to persistent state file")
+	if err := args.Parse(os.Args[2:]); err != nil {
+		log.Fatal(err)
+	}
+
+	store, err := agent.NewStore(*statePath)
+	if err != nil {
+		log.Fatalf("store: %v", err)
+	}
+
+	manager := terminal.NewManager()
+	s := &server{
+		manager:   manager,
+		store:     store,
+		prompts:   agent.NewPromptDetector(),
+		eventSubs: make(map[string]map[int]chan hostEvent),
+	}
+	s.watcher = agent.NewTranscriptWatcher(store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.watcher.Start(ctx)
+
+	s.mirror = mirror.NewServer(manager, nil, nil)
+	if err := s.mirror.Start(*attachAddr); err != nil {
+		log.Fatalf("attach server: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", s.health)
+	mux.HandleFunc("/mcp", s.mcp)
+	mux.HandleFunc("/v1/state", s.state)
+	mux.HandleFunc("/v1/state/events", s.stateEvents)
+	mux.HandleFunc("/v1/instances", s.instancesCollection)
+	mux.HandleFunc("/v1/instances/", s.instance)
+
+	log.Printf("agent-host listening http=%s attach=%s state=%s", *httpAddr, *attachAddr, *statePath)
+	if err := http.ListenAndServe(*httpAddr, mux); err != nil {
+		log.Fatal(err)
+	}
 }
 
-type startResponse struct {
-	SessionID string `json:"sessionId"`
-	PID       int    `json:"pid"`
+func defaultStatePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "clichat-state.json"
+	}
+	return filepath.Join(home, ".clichat", "state.json")
+}
+
+func (s *server) health(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *server) state(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"instances": s.store.Snapshot()})
+}
+
+func (s *server) stateEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	w.Header().Set("content-type", "text/event-stream")
+	w.Header().Set("cache-control", "no-cache")
+	w.Header().Set("connection", "keep-alive")
+
+	out := make(chan []agent.Event, 32)
+	_, unsubscribe := s.store.Subscribe(func(events []agent.Event) {
+		select {
+		case out <- events:
+		default:
+		}
+	})
+	defer unsubscribe()
+	defer close(out)
+
+	writeSSE(w, "snapshot", map[string]any{"instances": s.store.Snapshot()})
+	flusher.Flush()
+
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	ctx := r.Context()
+	for {
+		select {
+		case events := <-out:
+			for _, event := range events {
+				writeSSE(w, string(event.Kind), event)
+			}
+			flusher.Flush()
+		case <-ticker.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *server) instancesCollection(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"instances": s.store.Snapshot()})
+	case http.MethodPost:
+		s.createInstance(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+type createInstanceRequest struct {
+	Origin          string `json:"origin"`
+	ProviderID      string `json:"providerId"`
+	Title           string `json:"title"`
+	CWD             string `json:"cwd"`
+	TTY             string `json:"tty"`
+	PID             int    `json:"pid"`
+	ClaudeSessionID string `json:"claudeSessionId"`
+	TranscriptPath  string `json:"transcriptPath"`
+}
+
+func (s *server) createInstance(w http.ResponseWriter, r *http.Request) {
+	var input createInstanceRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	switch agent.Origin(input.Origin) {
+	case agent.OriginExternal:
+		inst := s.store.RegisterExternal(agent.RegisterExternalInput{
+			ProviderID:      input.ProviderID,
+			Title:           input.Title,
+			CWD:             input.CWD,
+			TTY:             input.TTY,
+			PID:             input.PID,
+			ClaudeSessionID: input.ClaudeSessionID,
+			TranscriptPath:  input.TranscriptPath,
+		})
+		writeJSON(w, http.StatusOK, inst)
+	case agent.OriginInternal, "":
+		inst := s.store.CreateInternal(agent.CreateInternalInput{
+			ProviderID: input.ProviderID,
+			Title:      input.Title,
+			CWD:        input.CWD,
+		})
+		writeJSON(w, http.StatusOK, inst)
+	default:
+		writeError(w, http.StatusBadRequest, "origin must be internal or external")
+	}
+}
+
+func (s *server) instance(w http.ResponseWriter, r *http.Request) {
+	id, action, ok := splitInstancePath(r.URL.Path)
+	if !ok || id == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	switch action {
+	case "":
+		s.instanceRoot(w, r, id)
+	case "status":
+		s.instanceStatus(w, r, id)
+	case "message":
+		s.instanceMessage(w, r, id)
+	case "pending":
+		s.instancePending(w, r, id)
+	case "send":
+		s.instanceSend(w, r, id)
+	case "events":
+		s.instanceEvents(w, r, id)
+	case "start-terminal":
+		s.instanceStartTerminal(w, r, id)
+	case "stop-terminal":
+		s.instanceStopTerminal(w, r, id)
+	case "attach-claude":
+		s.instanceAttachClaude(w, r, id)
+	default:
+		writeError(w, http.StatusNotFound, "not found")
+	}
+}
+
+func (s *server) instanceRoot(w http.ResponseWriter, r *http.Request, id string) {
+	switch r.Method {
+	case http.MethodGet:
+		inst, ok := s.store.Get(id)
+		if !ok {
+			writeError(w, http.StatusNotFound, "instance not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, inst)
+	case http.MethodDelete:
+		_ = s.manager.Stop(id)
+		s.store.Unregister(id)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+type statusRequest struct {
+	Status string `json:"status"`
+	Tool   string `json:"tool"`
+}
+
+func (s *server) instanceStatus(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var input statusRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	inst, ok := s.store.SetStatus(id, agent.StatusInput{
+		Status: agent.Status(input.Status),
+		Tool:   input.Tool,
+	})
+	if !ok {
+		writeError(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
+}
+
+type messageRequest struct {
+	Role string `json:"role"`
+	Text string `json:"text"`
+}
+
+func (s *server) instanceMessage(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var input messageRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	role := agent.Role(strings.ToLower(strings.TrimSpace(input.Role)))
+	if role == "" {
+		role = agent.RoleAssistant
+	}
+	inst, _, ok := s.store.AppendMessage(id, agent.AppendInput{Role: role, Text: input.Text})
+	if !ok {
+		writeError(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
+}
+
+type pendingRequest struct {
+	Question string                `json:"question"`
+	Actions  []agent.PendingAction `json:"actions"`
+}
+
+func (s *server) instancePending(w http.ResponseWriter, r *http.Request, id string) {
+	switch r.Method {
+	case http.MethodPost:
+		var input pendingRequest
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		inst, ok := s.store.SetPending(id, input.Question, input.Actions)
+		if !ok {
+			writeError(w, http.StatusNotFound, "instance not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, inst)
+	case http.MethodDelete:
+		inst, ok := s.store.ClearPending(id)
+		if !ok {
+			writeError(w, http.StatusNotFound, "instance not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, inst)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
 }
 
 type sendRequest struct {
@@ -52,91 +352,20 @@ type sendRequest struct {
 	Data string `json:"data"`
 }
 
-func main() {
-	if len(os.Args) > 1 && os.Args[1] != "serve" {
-		fmt.Fprintln(os.Stderr, "usage: agent-host serve")
-		os.Exit(2)
-	}
-
-	manager := terminal.NewManager()
-	s := &server{manager: manager, eventSubs: make(map[string]map[int]chan hostEvent)}
-	s.mirror = mirror.NewServer(manager, nil, nil)
-	if err := s.mirror.Start(defaultTTYAddress); err != nil {
-		log.Fatalf("attach server: %v", err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", s.health)
-	mux.HandleFunc("/mcp", s.mcp)
-	mux.HandleFunc("/v1/sessions", s.sessions)
-	mux.HandleFunc("/v1/sessions/", s.session)
-
-	log.Printf("agent-host listening http=%s attach=%s", defaultHTTPAddress, defaultTTYAddress)
-	if err := http.ListenAndServe(defaultHTTPAddress, mux); err != nil {
-		log.Fatal(err)
-	}
-}
-
-func (s *server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
+func (s *server) instanceSend(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-
-	var input startRequest
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-	if input.SessionID == "" || input.Command == "" {
-		writeError(w, http.StatusBadRequest, "sessionId and command are required")
-		return
-	}
-
-	process, err := s.manager.Start(terminal.StartOptions{
-		SessionID: input.SessionID,
-		Command:   input.Command,
-		Args:      input.Args,
-		CWD:       input.CWD,
-		OnExit: func(sessionID string, _ error) {
-			s.manager.Forget(sessionID)
-		},
-	})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, startResponse{SessionID: input.SessionID, PID: process.PID()})
-}
-
-func (s *server) session(w http.ResponseWriter, r *http.Request) {
-	sessionID, action, ok := parseSessionPath(r.URL.Path)
+	inst, ok := s.store.Get(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not found")
+		writeError(w, http.StatusNotFound, "instance not found")
 		return
 	}
-
-	switch action {
-	case "send":
-		s.send(w, r, sessionID)
-	case "events":
-		s.events(w, r, sessionID)
-	default:
-		writeError(w, http.StatusNotFound, "not found")
-	}
-}
-
-func (s *server) send(w http.ResponseWriter, r *http.Request, sessionID string) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	if inst.Origin != agent.OriginInternal {
+		writeError(w, http.StatusBadRequest, "send only supported on internal instances")
 		return
 	}
-
 	var input sendRequest
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
@@ -148,39 +377,157 @@ func (s *server) send(w http.ResponseWriter, r *http.Request, sessionID string) 
 			writeError(w, http.StatusBadRequest, "invalid base64 data")
 			return
 		}
-		if err := s.manager.Send(sessionID, decoded); err != nil {
+		if err := s.manager.Send(id, decoded); err != nil {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 		return
 	}
-	if err := s.manager.SendLine(sessionID, input.Text); err != nil {
+	if err := s.manager.SendLine(id, input.Text); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 }
 
-func (s *server) events(w http.ResponseWriter, r *http.Request, sessionID string) {
+type startTerminalRequest struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+	CWD     string   `json:"cwd"`
+	Env     []string `json:"env"`
+}
+
+type attachClaudeRequest struct {
+	ClaudeSessionID string `json:"claudeSessionId"`
+	TranscriptPath  string `json:"transcriptPath"`
+	TTY             string `json:"tty"`
+	PID             int    `json:"pid"`
+	CWD             string `json:"cwd"`
+}
+
+func (s *server) instanceStartTerminal(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	inst, ok := s.store.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	if inst.Origin != agent.OriginInternal {
+		writeError(w, http.StatusBadRequest, "cannot start terminal for external instance")
+		return
+	}
+	var input startTerminalRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if input.Command == "" {
+		writeError(w, http.StatusBadRequest, "command is required")
+		return
+	}
+	effectiveCWD := firstNonEmpty(input.CWD, inst.CWD)
+	if effectiveCWD == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			effectiveCWD = home
+		}
+	}
+	process, err := s.manager.Start(terminal.StartOptions{
+		SessionID:  id,
+		ProviderID: inst.ProviderID,
+		Command:    input.Command,
+		Args:       input.Args,
+		CWD:        effectiveCWD,
+		Env:        input.Env,
+		OnExit: func(sessionID string, _ error) {
+			s.manager.Forget(sessionID)
+			s.store.SetTerminalAttached(sessionID, false, 0)
+			s.prompts.Clear(sessionID)
+		},
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Persist the working directory so the JSONL→instance linker can match against it.
+	s.store.UpdateCWD(id, effectiveCWD)
+	updated, _ := s.store.SetTerminalAttached(id, true, process.PID())
+	go s.runPromptWatcher(id)
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *server) runPromptWatcher(sessionID string) {
+	output, unsubscribe, err := s.manager.Subscribe(sessionID)
+	if err != nil {
+		return
+	}
+	defer unsubscribe()
+	for chunk := range output {
+		question, actions, ok := s.prompts.Feed(sessionID, chunk)
+		if !ok {
+			continue
+		}
+		s.store.SetPending(sessionID, question, actions)
+	}
+}
+
+func (s *server) instanceAttachClaude(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var input attachClaudeRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	updated, ok := s.store.AttachClaude(id, agent.AttachClaudeInput{
+		ClaudeSessionID: input.ClaudeSessionID,
+		TranscriptPath:  input.TranscriptPath,
+		TTY:             input.TTY,
+		PID:             input.PID,
+		CWD:             input.CWD,
+	})
+	if !ok {
+		writeError(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *server) instanceStopTerminal(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if err := s.manager.Stop(id); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	updated, _ := s.store.SetTerminalAttached(id, false, 0)
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *server) instanceEvents(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-
-	output, unsubscribe, err := s.manager.Subscribe(sessionID)
+	output, unsubscribe, err := s.manager.Subscribe(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	defer unsubscribe()
-	hostEvents, unsubscribeHost := s.subscribeEvents(sessionID)
+	hostEvents, unsubscribeHost := s.subscribeEvents(id)
 	defer unsubscribeHost()
 
 	w.Header().Set("content-type", "text/event-stream")
 	w.Header().Set("cache-control", "no-cache")
 	w.Header().Set("connection", "keep-alive")
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
@@ -209,7 +556,7 @@ func (s *server) events(w http.ResponseWriter, r *http.Request, sessionID string
 			flusher.Flush()
 		case <-ctx.Done():
 			if !errors.Is(ctx.Err(), context.Canceled) {
-				log.Printf("events %s: %v", sessionID, ctx.Err())
+				log.Printf("events %s: %v", id, ctx.Err())
 			}
 			return
 		}
@@ -289,38 +636,61 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 	case "initialize":
 		writeRPCResult(w, req.ID, map[string]any{
 			"protocolVersion": "2024-11-05",
-			"capabilities": map[string]any{
-				"tools": map[string]any{},
-			},
-			"serverInfo": map[string]any{
-				"name":    "agent-chat-local",
-				"version": "0.1.0",
-			},
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo":      map[string]any{"name": "clichat", "version": "0.2.0"},
 		})
 	case "tools/list":
 		writeRPCResult(w, req.ID, map[string]any{
 			"tools": []map[string]any{
 				{
-					"name":        "agent_chat_reply",
-					"description": "Send the exact user-facing assistant reply to the Agent Chat Local UI. Call once per final response.",
+					"name":        "agent_chat_set_topic",
+					"description": "Update the short topic shown as the chat name in CLIchat. Call at the start of every new task and whenever the focus shifts. Keep it 2-6 words in the user's language.",
 					"inputSchema": map[string]any{
 						"type":     "object",
-						"required": []string{"session_id", "text"},
+						"required": []string{"topic"},
 						"properties": map[string]any{
-							"session_id": map[string]any{"type": "string"},
-							"text":       map[string]any{"type": "string"},
+							"session_id":        map[string]any{"type": "string"},
+							"claude_session_id": map[string]any{"type": "string"},
+							"topic":             map[string]any{"type": "string"},
+						},
+					},
+				},
+				{
+					"name":        "agent_chat_register",
+					"description": "Register a Claude Code session with CLIchat. Call once on session start. Returns the agent-chat instance id.",
+					"inputSchema": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"claude_session_id": map[string]any{"type": "string"},
+							"title":             map[string]any{"type": "string"},
+							"cwd":               map[string]any{"type": "string"},
+							"transcript_path":   map[string]any{"type": "string"},
+						},
+					},
+				},
+				{
+					"name":        "agent_chat_reply",
+					"description": "Send the exact user-facing assistant reply to the CLIchat UI. Call once per final response.",
+					"inputSchema": map[string]any{
+						"type":     "object",
+						"required": []string{"text"},
+						"properties": map[string]any{
+							"session_id":        map[string]any{"type": "string"},
+							"claude_session_id": map[string]any{"type": "string"},
+							"text":              map[string]any{"type": "string"},
 						},
 					},
 				},
 				{
 					"name":        "agent_chat_question",
-					"description": "Ask the user for confirmation/input in the Agent Chat Local UI.",
+					"description": "Ask the user for confirmation/input in the CLIchat UI.",
 					"inputSchema": map[string]any{
 						"type":     "object",
-						"required": []string{"session_id", "question"},
+						"required": []string{"question"},
 						"properties": map[string]any{
-							"session_id": map[string]any{"type": "string"},
-							"question":   map[string]any{"type": "string"},
+							"session_id":        map[string]any{"type": "string"},
+							"claude_session_id": map[string]any{"type": "string"},
+							"question":          map[string]any{"type": "string"},
 						},
 					},
 				},
@@ -332,22 +702,50 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 			writeRPCError(w, req.ID, -32602, "invalid tool params")
 			return
 		}
-		sessionID := stringArg(params.Arguments, "session_id")
-		if sessionID == "" {
-			writeRPCError(w, req.ID, -32602, "session_id is required")
-			return
-		}
 		switch params.Name {
+		case "agent_chat_set_topic":
+			id := s.resolveInstance(params.Arguments)
+			if id == "" {
+				writeRPCError(w, req.ID, -32602, "session not found")
+				return
+			}
+			topic := stringArg(params.Arguments, "topic")
+			s.store.SetTopic(id, topic)
+			writeToolResult(w, req.ID, "ok")
+		case "agent_chat_register":
+			inst := s.store.RegisterExternal(agent.RegisterExternalInput{
+				ProviderID:      "claude",
+				Title:           stringArg(params.Arguments, "title"),
+				CWD:             stringArg(params.Arguments, "cwd"),
+				ClaudeSessionID: stringArg(params.Arguments, "claude_session_id"),
+				TranscriptPath:  stringArg(params.Arguments, "transcript_path"),
+			})
+			writeToolResult(w, req.ID, fmt.Sprintf("registered:%s", inst.ID))
 		case "agent_chat_reply":
+			id := s.resolveInstance(params.Arguments)
+			if id == "" {
+				writeRPCError(w, req.ID, -32602, "session not found")
+				return
+			}
 			text := strings.TrimSpace(stringArg(params.Arguments, "text"))
 			if text != "" {
-				s.emit(sessionID, hostEvent{Type: "chat", Data: []byte(text)})
+				s.store.AppendMessage(id, agent.AppendInput{Role: agent.RoleAssistant, Text: text})
+				s.emit(id, hostEvent{Type: "chat", Data: []byte(text)})
 			}
 			writeToolResult(w, req.ID, "ok")
 		case "agent_chat_question":
+			id := s.resolveInstance(params.Arguments)
+			if id == "" {
+				writeRPCError(w, req.ID, -32602, "session not found")
+				return
+			}
 			question := strings.TrimSpace(stringArg(params.Arguments, "question"))
 			if question != "" {
-				s.emit(sessionID, hostEvent{Type: "question", Data: []byte(question)})
+				s.store.SetPending(id, question, []agent.PendingAction{
+					{ID: "yes", Label: "Sim", Input: "y"},
+					{ID: "no", Label: "Nao", Input: "n"},
+				})
+				s.emit(id, hostEvent{Type: "question", Data: []byte(question)})
 			}
 			writeToolResult(w, req.ID, "ok")
 		default:
@@ -356,6 +754,20 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeRPCError(w, req.ID, -32601, "method not found")
 	}
+}
+
+func (s *server) resolveInstance(args map[string]any) string {
+	if id := stringArg(args, "session_id"); id != "" {
+		if _, ok := s.store.Get(id); ok {
+			return id
+		}
+	}
+	if claudeID := stringArg(args, "claude_session_id"); claudeID != "" {
+		if inst, ok := s.store.FindByClaudeSessionID(claudeID); ok {
+			return inst.ID
+		}
+	}
+	return ""
 }
 
 func stringArg(args map[string]any, key string) string {
@@ -386,19 +798,22 @@ func writeRPCError(w http.ResponseWriter, id any, code int, message string) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
-		"error": map[string]any{
-			"code":    code,
-			"message": message,
-		},
+		"error":   map[string]any{"code": code, "message": message},
 	})
 }
 
-func parseSessionPath(path string) (string, string, bool) {
+func splitInstancePath(path string) (string, string, bool) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 4 || parts[0] != "v1" || parts[1] != "sessions" {
+	if len(parts) < 3 || parts[0] != "v1" || parts[1] != "instances" {
 		return "", "", false
 	}
-	return parts[2], parts[3], true
+	if len(parts) == 3 {
+		return parts[2], "", true
+	}
+	if len(parts) == 4 {
+		return parts[2], parts[3], true
+	}
+	return "", "", false
 }
 
 func writeEvent(w http.ResponseWriter, kind string, data []byte, message string) {
@@ -413,6 +828,11 @@ func writeEvent(w http.ResponseWriter, kind string, data []byte, message string)
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", encoded)
 }
 
+func writeSSE(w http.ResponseWriter, kind string, payload any) {
+	encoded, _ := json.Marshal(map[string]any{"kind": kind, "payload": payload})
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", kind, encoded)
+}
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
@@ -421,4 +841,13 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }

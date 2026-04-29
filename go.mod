@@ -1,4 +1,4 @@
-module agent-chat-local
+module clichat
 
 go 1.25.0
 

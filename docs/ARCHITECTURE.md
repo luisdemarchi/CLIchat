@@ -30,7 +30,7 @@ Fluxo desejado:
 
 ## Equivalencias vindas do claude-voice
 
-| claude-voice | agent-chat-local |
+| claude-voice | clichat |
 | --- | --- |
 | `InstanceRegistry` | `internal/session.Registry` |
 | `InstanceStatus` | `session.Status` |

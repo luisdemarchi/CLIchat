@@ -3,7 +3,7 @@ package main
 import (
 	"embed"
 
-	localapp "agent-chat-local/internal/app"
+	localapp "clichat/internal/app"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -17,13 +17,13 @@ func main() {
 	application := localapp.New()
 
 	err := wails.Run(&options.App{
-		Title:  "Agent Chat Local",
+		Title:  "CLIchat",
 		Width:  1180,
 		Height: 780,
 		Mac: &mac.Options{
 			About: &mac.AboutInfo{
-				Title:   "Agent Chat Local",
-				Message: "Chat local para Claude, Gemini e Codex.",
+				Title:   "CLIchat",
+				Message: "WhatsApp-style desktop chat for Claude Code and Codex CLIs.\n\nProjeto open source feito por Luís De Marchi (@luisdemarchi) — Brasil.",
 			},
 		},
 		AssetServer: &assetserver.Options{

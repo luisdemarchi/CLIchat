@@ -13,11 +13,12 @@ declare global {
           SendTerminalInput: (input: { sessionId: string; data: string }) => Promise<void>;
           OpenTerminal: (input: { sessionId: string }) => Promise<string>;
           ExternalAttachCommand: (sessionId: string) => Promise<string>;
+          FocusTerminal: (sessionId: string) => Promise<void>;
         };
       };
     };
     runtime?: {
-      EventsOn: (event: string, callback: (payload: Bootstrap) => void) => () => void;
+      EventsOn: (event: string, callback: (...args: unknown[]) => void) => () => void;
     };
   }
 }
@@ -124,6 +125,17 @@ export async function openTerminal(input: { sessionId: string }): Promise<string
   throw new Error('Backend Wails indisponivel. Abra pelo app desktop para copiar o comando.');
 }
 
+export async function focusTerminal(sessionId: string): Promise<void> {
+  const api = bridge();
+  if (api?.FocusTerminal) {
+    return api.FocusTerminal(sessionId);
+  }
+  throw new Error('Backend Wails indisponivel.');
+}
+
 export function onStateUpdate(callback: (payload: Bootstrap) => void): () => void {
-  return window.runtime?.EventsOn?.('state:update', callback) ?? (() => undefined);
+  return (
+    window.runtime?.EventsOn?.('state:update', (...args: unknown[]) => callback(args[0] as Bootstrap)) ??
+    (() => undefined)
+  );
 }

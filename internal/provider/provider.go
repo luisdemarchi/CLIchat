@@ -37,15 +37,6 @@ func Defaults() []Provider {
 			Description: "Claude Code em uma sessao local controlada pelo app.",
 		},
 		{
-			ID:          Gemini,
-			Name:        "Gemini",
-			CLI:         "gemini",
-			Args:        []string{"--screen-reader"},
-			Tag:         "GEMINI",
-			Accent:      "#167c80",
-			Description: "Gemini CLI em uma sessao local controlada pelo app.",
-		},
-		{
 			ID:          Codex,
 			Name:        "Codex",
 			CLI:         "codex",

@@ -4,6 +4,7 @@ package terminal
 
 import (
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 )
@@ -23,6 +24,9 @@ func startProcess(options StartOptions) (*Process, error) {
 	cmd := exec.Command(options.Command, options.Args...)
 	if options.CWD != "" {
 		cmd.Dir = options.CWD
+	}
+	if len(options.Env) > 0 {
+		cmd.Env = append(append([]string{}, os.Environ()...), options.Env...)
 	}
 
 	stdin, err := cmd.StdinPipe()

@@ -9,12 +9,14 @@ type OutputFunc func(sessionID string, text string)
 type ExitFunc func(sessionID string, err error)
 
 type StartOptions struct {
-	SessionID string
-	Command   string
-	Args      []string
-	CWD       string
-	OnOutput  OutputFunc
-	OnExit    ExitFunc
+	SessionID  string
+	Command    string
+	Args       []string
+	CWD        string
+	Env        []string
+	ProviderID string
+	OnOutput   OutputFunc
+	OnExit     ExitFunc
 }
 
 type Manager struct {

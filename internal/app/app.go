@@ -2,39 +2,84 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
-	"agent-chat-local/internal/hostclient"
-	"agent-chat-local/internal/mirror"
-	"agent-chat-local/internal/provider"
-	"agent-chat-local/internal/session"
+	"clichat/internal/agent"
+	"clichat/internal/hostclient"
+	"clichat/internal/mirror"
+	"clichat/internal/provider"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-var ansiPattern = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\a]*(?:\a|\x1b\\))`)
-var controlPattern = regexp.MustCompile(`[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]`)
-var datePattern = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}\b\.?`)
-var trailingTUIStatusPattern = regexp.MustCompile(`(?i)\s*(creating|processing|thinking|worked for \d+s|baked for \d+s|running .*hooks).*$`)
-var trailingDecorPattern = regexp.MustCompile(`(?:\s*[✢✣✤✥✦✧✶✷✸✹✺✻✼✽✾✿*+·•]\s*|\s+\d+\s*)+$`)
-
 type App struct {
-	ctx          context.Context
-	registry     *session.Registry
-	providers    []provider.Provider
-	host         *hostclient.Client
-	outputs      *outputFilter
-	transcriptMu sync.Mutex
-	transcripts  map[string]context.CancelFunc
+	ctx       context.Context
+	host      *hostclient.Client
+	providers []provider.Provider
+
+	mu        sync.RWMutex
+	instances map[string]agent.Instance
+	selected  string
+
+	subscribed map[string]bool
+	subMu      sync.Mutex
+
+	stateCancel context.CancelFunc
+}
+
+type Provider = provider.Provider
+
+type Session struct {
+	ID                string                `json:"id"`
+	Title             string                `json:"title"`
+	Topic             string                `json:"topic,omitempty"`
+	ProviderID        string                `json:"providerId"`
+	ProviderTag       string                `json:"providerTag"`
+	ProviderAccent    string                `json:"providerAccent"`
+	Origin            agent.Origin          `json:"origin"`
+	Status            agent.Status          `json:"status"`
+	CWD               string                `json:"cwd,omitempty"`
+	AvatarLabel       string                `json:"avatarLabel"`
+	LastMessage       string                `json:"lastMessage"`
+	CurrentTool       string                `json:"currentTool,omitempty"`
+	ProcessID         int                   `json:"processId,omitempty"`
+	TTY               string                `json:"tty,omitempty"`
+	ClaudeSessionID   string                `json:"claudeSessionId,omitempty"`
+	ExternalAttach    string                `json:"externalAttach"`
+	CreatedAt         string                `json:"createdAt"`
+	UpdatedAt         string                `json:"updatedAt"`
+	Messages          []agent.Message       `json:"messages"`
+	PendingQuestion   string                `json:"pendingQuestion,omitempty"`
+	PendingActions    []agent.PendingAction `json:"pendingActions"`
+	TerminalAttached  bool                  `json:"terminalAttached"`
+	TranscriptPath    string                `json:"transcriptPath,omitempty"`
+}
+
+type Bootstrap struct {
+	Providers []provider.Provider `json:"providers"`
+	Sessions  []Session           `json:"sessions"`
+	Selected  *Session            `json:"selected,omitempty"`
+	Mirror    mirror.Status       `json:"mirror"`
+}
+
+type CreateInput struct {
+	ProviderID provider.ID `json:"providerId"`
+	Title      string      `json:"title"`
+	CWD        string      `json:"cwd"`
+}
+
+type SendInput struct {
+	SessionID string `json:"sessionId"`
+	Text      string `json:"text"`
 }
 
 type TerminalInput struct {
@@ -52,30 +97,240 @@ type TerminalRawInput struct {
 	Data      string `json:"data"`
 }
 
-type Bootstrap struct {
-	Providers []provider.Provider `json:"providers"`
-	Sessions  []session.Session   `json:"sessions"`
-	Selected  *session.Session    `json:"selected,omitempty"`
-	Mirror    mirror.Status       `json:"mirror"`
-}
-
 func New() *App {
-	providers := provider.Defaults()
-	registry := session.NewRegistry()
-
 	return &App{
-		registry:    registry,
-		providers:   providers,
-		host:        hostclient.New(""),
-		outputs:     newOutputFilter(),
-		transcripts: make(map[string]context.CancelFunc),
+		host:       hostclient.New(""),
+		providers:  provider.Defaults(),
+		instances:  make(map[string]agent.Instance),
+		subscribed: make(map[string]bool),
 	}
 }
 
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
+	go a.bootstrapLoop()
+}
+
+func (a *App) bootstrapLoop() {
+	for {
+		if a.ctx.Err() != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		err := a.host.Health(ctx)
+		cancel()
+		if err == nil {
+			break
+		}
+		select {
+		case <-time.After(1500 * time.Millisecond):
+		case <-a.ctx.Done():
+			return
+		}
+	}
+
+	if state, err := a.host.State(context.Background()); err == nil {
+		a.mu.Lock()
+		for _, inst := range state.Instances {
+			a.instances[inst.ID] = inst
+		}
+		a.mu.Unlock()
+		a.subscribeInternalSessions()
+		a.tryAutoReconnect()
+	}
+
+	a.emitState()
+	a.startStateStream()
+}
+
+// tryAutoReconnect re-spawns PTYs for internal instances that were marked
+// offline at boot (daemon restarted, or app reopened after closing). For
+// Claude it adds `--resume <claudeSessionId>` so the conversation context is
+// preserved; for Codex it uses `codex resume --last`. Gemini falls back to a
+// fresh session because it has no documented resume flag.
+func (a *App) tryAutoReconnect() {
+	a.mu.RLock()
+	var candidates []agent.Instance
+	for _, inst := range a.instances {
+		if inst.Origin == agent.OriginInternal && !inst.TerminalAttached {
+			candidates = append(candidates, inst)
+		}
+	}
+	a.mu.RUnlock()
+	for _, inst := range candidates {
+		instCopy := inst
+		go a.reconnectInstance(instCopy)
+	}
+}
+
+func (a *App) reconnectInstance(inst agent.Instance) {
+	prov, ok := a.providerByID(provider.ID(inst.ProviderID))
+	if !ok || !prov.Available {
+		return
+	}
+	command := prov.Command
+	args := append([]string{}, prov.Args...)
+	switch inst.ProviderID {
+	case "claude":
+		if inst.ClaudeSessionID != "" {
+			args = append([]string{"--resume", inst.ClaudeSessionID}, args...)
+		}
+		args = append(args, claudeAgentChatArgs(inst.ID, prov)...)
+	case "codex":
+		// `codex resume --last` reattaches to the most recent rollout. Falls back
+		// gracefully to a fresh interactive session if no rollout exists.
+		args = append([]string{"resume", "--last"}, args...)
+	case "gemini":
+		// No resume flag — restart with the original interactive command.
+	}
+	env := []string{
+		"AGENT_CHAT_INTERNAL_SESSION_ID=" + inst.ID,
+		"AGENT_CHAT_HOST=" + a.host.BaseURL(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := a.host.StartTerminal(ctx, inst.ID, hostclient.StartTerminalInput{
+		Command: command,
+		Args:    args,
+		CWD:     inst.CWD,
+		Env:     env,
+	}); err == nil {
+		a.subscribeOutput(inst.ID)
+	}
+}
+
+func (a *App) startStateStream() {
+	if a.stateCancel != nil {
+		a.stateCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.stateCancel = cancel
+
+	go func() {
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			err := a.host.SubscribeState(ctx, func(event hostclient.StateEvent) {
+				switch event.Kind {
+				case "snapshot":
+					var payload struct {
+						Instances []agent.Instance `json:"instances"`
+					}
+					if err := json.Unmarshal(event.Payload, &payload); err == nil {
+						a.applySnapshot(payload.Instances)
+					}
+				case "instance_updated":
+					var payload struct {
+						Payload agent.Instance `json:"payload"`
+					}
+					if err := json.Unmarshal(event.Payload, &payload); err == nil {
+						a.applyInstance(payload.Payload)
+					}
+				case "instance_removed":
+					var payload struct {
+						ID string `json:"id"`
+					}
+					if err := json.Unmarshal(event.Payload, &payload); err == nil {
+						a.removeInstance(payload.ID)
+					}
+				}
+			})
+			if err == nil {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
+		}
+	}()
+}
+
+func (a *App) applySnapshot(list []agent.Instance) {
+	a.mu.Lock()
+	a.instances = make(map[string]agent.Instance, len(list))
+	for _, inst := range list {
+		a.instances[inst.ID] = inst
+	}
+	a.mu.Unlock()
+	a.subscribeInternalSessions()
 	a.emitState()
 }
+
+func (a *App) applyInstance(inst agent.Instance) {
+	a.mu.Lock()
+	a.instances[inst.ID] = inst
+	a.mu.Unlock()
+	if inst.Origin == agent.OriginInternal && inst.TerminalAttached {
+		a.subscribeOutput(inst.ID)
+	}
+	a.emitState()
+}
+
+func (a *App) removeInstance(id string) {
+	a.mu.Lock()
+	delete(a.instances, id)
+	if a.selected == id {
+		a.selected = ""
+	}
+	a.mu.Unlock()
+	a.subMu.Lock()
+	delete(a.subscribed, id)
+	a.subMu.Unlock()
+	a.emitState()
+}
+
+func (a *App) subscribeInternalSessions() {
+	a.mu.RLock()
+	ids := make([]string, 0, len(a.instances))
+	for id, inst := range a.instances {
+		if inst.Origin == agent.OriginInternal && inst.TerminalAttached {
+			ids = append(ids, id)
+		}
+	}
+	a.mu.RUnlock()
+	for _, id := range ids {
+		a.subscribeOutput(id)
+	}
+}
+
+func (a *App) subscribeOutput(id string) {
+	a.subMu.Lock()
+	if a.subscribed[id] {
+		a.subMu.Unlock()
+		return
+	}
+	a.subscribed[id] = true
+	a.subMu.Unlock()
+
+	go func() {
+		err := a.host.SubscribeOutput(context.Background(), id, func(event hostclient.Event) {
+			switch event.Type {
+			case "output":
+				if a.ctx != nil && len(event.Data) > 0 {
+					wailsruntime.EventsEmit(a.ctx, "terminal:"+id, base64.StdEncoding.EncodeToString(event.Data))
+				}
+			case "exit":
+				a.subMu.Lock()
+				delete(a.subscribed, id)
+				a.subMu.Unlock()
+				if a.ctx != nil {
+					wailsruntime.EventsEmit(a.ctx, "terminal:"+id+":exit", true)
+				}
+			}
+		})
+		_ = err
+		a.subMu.Lock()
+		delete(a.subscribed, id)
+		a.subMu.Unlock()
+	}()
+}
+
+// ---------------------------------------------------------------------------
+// Wails-bound API
+// ---------------------------------------------------------------------------
 
 func (a *App) GetBootstrap() Bootstrap {
 	return a.bootstrap()
@@ -85,102 +340,162 @@ func (a *App) ListProviders() []provider.Provider {
 	return a.providers
 }
 
-func (a *App) ListSessions() []session.Session {
-	return a.registry.List()
+func (a *App) ListSessions() []Session {
+	return a.sessions()
 }
 
-func (a *App) SelectSession(id string) (session.Session, error) {
-	selected, err := a.registry.Select(id)
-	if err != nil {
-		return session.Session{}, err
-	}
-	a.emitState()
-	return selected, nil
-}
-
-func (a *App) CreateChat(input session.CreateInput) (session.Session, error) {
-	item, ok := a.providerByID(input.ProviderID)
+func (a *App) SelectSession(id string) (Session, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	inst, ok := a.instances[id]
 	if !ok {
-		return session.Session{}, fmt.Errorf("unknown provider: %s", input.ProviderID)
+		return Session{}, errors.New("session not found")
 	}
-	if !item.Available {
-		return session.Session{}, fmt.Errorf("%s CLI not found", item.Name)
-	}
+	a.selected = id
+	return a.toSession(inst), nil
+}
 
-	created := a.registry.Create(input, item)
-	created, _ = a.registry.SetExternalAttach(created.ID, "agent-host serve")
+func (a *App) CreateChat(input CreateInput) (Session, error) {
+	prov, ok := a.providerByID(provider.ID(input.ProviderID))
+	if !ok {
+		return Session{}, fmt.Errorf("unknown provider: %s", input.ProviderID)
+	}
+	if !prov.Available {
+		return Session{}, fmt.Errorf("%s CLI not found", prov.Name)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := a.host.Health(ctx); err != nil {
-		created, _ = a.registry.SetWaiting(created.ID, "Inicie o host: agent-host serve")
-		a.emitState()
-		return created, nil
+		return Session{}, errors.New("agent-host offline. Rode: agent-host serve")
 	}
 
-	pid, err := a.startTerminalSession(created.ID, item, created.CWD)
+	inst, err := a.host.CreateInstance(ctx, hostclient.CreateInstanceInput{
+		Origin:     agent.OriginInternal,
+		ProviderID: string(prov.ID),
+		Title:      input.Title,
+		CWD:        input.CWD,
+	})
 	if err != nil {
-		created, _ = a.registry.SetWaiting(created.ID, "agent-host online, mas o terminal nao iniciou: "+err.Error())
-		a.emitState()
-		return created, nil
+		return Session{}, err
 	}
 
-	created, _ = a.registry.SetTerminal(created.ID, true, pid)
-	created, _ = a.registry.SetExternalAttach(created.ID, "agentctl attach "+created.ID)
-	created, _ = a.registry.SetLastMessage(created.ID, fmt.Sprintf("%s pronto no terminal local.", item.Name))
-	a.outputs.register(created.ID)
-	a.subscribeHost(created.ID)
-	if item.ID == provider.Claude {
-		a.startClaudeTranscriptWatcher(created.ID, created.CWD)
+	args := append([]string{}, prov.Args...)
+	if prov.ID == provider.Claude {
+		args = append(args, claudeAgentChatArgs(inst.ID, prov)...)
 	}
+	env := []string{
+		"AGENT_CHAT_INTERNAL_SESSION_ID=" + inst.ID,
+		"AGENT_CHAT_HOST=" + a.host.BaseURL(),
+	}
+	updated, err := a.host.StartTerminal(ctx, inst.ID, hostclient.StartTerminalInput{
+		Command: prov.Command,
+		Args:    args,
+		CWD:     input.CWD,
+		Env:     env,
+	})
+	if err != nil {
+		return a.toSession(inst), err
+	}
+
+	a.mu.Lock()
+	a.instances[updated.ID] = updated
+	a.selected = updated.ID
+	a.mu.Unlock()
+	a.subscribeOutput(updated.ID)
 	a.emitState()
-	return created, nil
+	return a.toSession(updated), nil
 }
 
-func (a *App) OpenTerminal(input TerminalInput) (string, error) {
-	item, ok := a.registry.Get(input.SessionID)
+// FocusTerminal brings the OS terminal window/tab that hosts this session to the front.
+// Best-effort: works on macOS Terminal.app via AppleScript; other platforms just activate
+// the terminal app.
+func (a *App) FocusTerminal(sessionID string) error {
+	a.mu.RLock()
+	inst, ok := a.instances[sessionID]
+	a.mu.RUnlock()
 	if !ok {
-		return "", errors.New("session not found")
+		return errors.New("session not found")
 	}
-	if item.ExternalAttach == "" {
-		return "", errors.New("terminal command not available")
-	}
-	wailsruntime.ClipboardSetText(a.ctx, item.ExternalAttach)
-	_ = openExternalTerminal(item.ExternalAttach)
-	return item.ExternalAttach, nil
+	return focusTerminalForSession(inst.TTY, inst.PID)
 }
 
-func (a *App) RespondToPrompt(input TerminalActionInput) (session.Session, error) {
-	current, ok := a.registry.Get(input.SessionID)
-	if !ok {
-		return session.Session{}, errors.New("session not found")
-	}
-	if len(current.PendingActions) == 0 {
-		return current, errors.New("nenhuma acao pendente")
+func (a *App) SendMessage(input SendInput) (Session, error) {
+	text := strings.TrimSpace(input.Text)
+	if text == "" {
+		return Session{}, errors.New("message cannot be empty")
 	}
 
-	found := false
-	value := input.Input
-	for _, action := range current.PendingActions {
-		if action.ID == input.ActionID {
-			value = action.Input
-			found = true
-			break
-		}
+	a.mu.RLock()
+	inst, ok := a.instances[input.SessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return Session{}, errors.New("session not found")
 	}
-	if !found {
-		return current, errors.New("acao pendente nao encontrada")
+	if inst.Status == agent.StatusBusy {
+		return a.toSession(inst), errors.New("aguarde a resposta atual terminar")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := a.host.Send(ctx, input.SessionID, value); err != nil {
-		return current, err
+
+	updated, err := a.host.AppendMessage(ctx, inst.ID, agent.RoleUser, text)
+	if err != nil {
+		return a.toSession(inst), err
 	}
-	updated, _ := a.registry.ClearPendingPrompt(input.SessionID)
-	_, _ = a.registry.SetStatus(input.SessionID, session.Idle, "")
-	a.emitState()
-	return updated, nil
+	if _, err := a.host.SetStatus(ctx, inst.ID, agent.StatusBusy, ""); err != nil {
+		return a.toSession(updated), err
+	}
+
+	if inst.Origin == agent.OriginInternal {
+		if err := a.host.SendText(ctx, inst.ID, text); err != nil {
+			_, _ = a.host.SetStatus(ctx, inst.ID, agent.StatusWaiting, "")
+			return a.toSession(updated), err
+		}
+	} else {
+		if err := sendToExternalTerminal(inst.TTY, text); err != nil {
+			_, _ = a.host.SetStatus(ctx, inst.ID, agent.StatusWaiting, "")
+			return a.toSession(updated), err
+		}
+	}
+
+	a.mu.Lock()
+	a.instances[updated.ID] = updated
+	a.mu.Unlock()
+	return a.toSession(updated), nil
+}
+
+func (a *App) RespondToPrompt(input TerminalActionInput) (Session, error) {
+	a.mu.RLock()
+	inst, ok := a.instances[input.SessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return Session{}, errors.New("session not found")
+	}
+	if len(inst.PendingActions) == 0 {
+		return a.toSession(inst), errors.New("nenhuma acao pendente")
+	}
+	value := input.Input
+	for _, action := range inst.PendingActions {
+		if action.ID == input.ActionID {
+			value = action.Input
+			break
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if inst.Origin == agent.OriginInternal {
+		if err := a.host.SendText(ctx, inst.ID, value); err != nil {
+			return a.toSession(inst), err
+		}
+	}
+	updated, _ := a.host.ClearPending(ctx, inst.ID)
+	_, _ = a.host.SetStatus(ctx, inst.ID, agent.StatusIdle, "")
+	a.mu.Lock()
+	a.instances[updated.ID] = updated
+	a.mu.Unlock()
+	return a.toSession(updated), nil
 }
 
 func (a *App) SendTerminalInput(input TerminalRawInput) error {
@@ -195,43 +510,32 @@ func (a *App) SendTerminalInput(input TerminalRawInput) error {
 	return a.host.SendData(ctx, input.SessionID, []byte(input.Data))
 }
 
-func (a *App) SendMessage(input session.SendInput) (session.Session, error) {
-	text := strings.TrimSpace(input.Text)
-	if text == "" {
-		return session.Session{}, errors.New("message cannot be empty")
-	}
-
-	current, ok := a.registry.Get(input.SessionID)
-	if !ok {
-		return session.Session{}, errors.New("session not found")
-	}
-	if current.Status == session.Busy {
-		return current, errors.New("aguarde a resposta atual terminar")
-	}
-	if _, err := a.registry.AppendUser(input.SessionID, text); err != nil {
-		return session.Session{}, err
-	}
-	if _, err := a.registry.SetStatus(input.SessionID, session.Busy, "terminal"); err != nil {
-		return session.Session{}, err
-	}
-	a.outputs.rememberInput(input.SessionID, text)
-	if err := a.runPrompt(input.SessionID, text); err != nil {
-		_, _ = a.registry.SetStatus(input.SessionID, session.Waiting, "")
-		updated, _ := a.registry.SetLastMessage(input.SessionID, err.Error())
-		a.emitState()
-		return updated, err
-	}
-	updated, _ := a.registry.Get(input.SessionID)
-	a.emitState()
-	return updated, nil
-}
-
-func (a *App) ExternalAttachCommand(sessionID string) (string, error) {
-	item, ok := a.registry.Get(sessionID)
+func (a *App) OpenTerminal(input TerminalInput) (string, error) {
+	a.mu.RLock()
+	inst, ok := a.instances[input.SessionID]
+	a.mu.RUnlock()
 	if !ok {
 		return "", errors.New("session not found")
 	}
-	return item.ExternalAttach, nil
+	command := externalAttachCommand(inst)
+	if command == "" {
+		return "", errors.New("comando de attach indisponivel")
+	}
+	if a.ctx != nil {
+		wailsruntime.ClipboardSetText(a.ctx, command)
+	}
+	_ = openExternalTerminal(command)
+	return command, nil
+}
+
+func (a *App) ExternalAttachCommand(sessionID string) (string, error) {
+	a.mu.RLock()
+	inst, ok := a.instances[sessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return "", errors.New("session not found")
+	}
+	return externalAttachCommand(inst), nil
 }
 
 func (a *App) MirrorStatus() mirror.Status {
@@ -253,6 +557,111 @@ func (a *App) MirrorStatus() mirror.Status {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+func (a *App) bootstrap() Bootstrap {
+	sessions := a.sessions()
+	var selected *Session
+	if a.selected != "" {
+		for i := range sessions {
+			if sessions[i].ID == a.selected {
+				copy := sessions[i]
+				selected = &copy
+				break
+			}
+		}
+	}
+	if selected == nil && len(sessions) > 0 {
+		copy := sessions[0]
+		selected = &copy
+	}
+	return Bootstrap{
+		Providers: a.providers,
+		Sessions:  sessions,
+		Selected:  selected,
+		Mirror:    a.MirrorStatus(),
+	}
+}
+
+func (a *App) sessions() []Session {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]Session, 0, len(a.instances))
+	for _, inst := range a.instances {
+		// Hide external sessions from the UI: end-users should see only chats this app
+		// owns, where it can drive the PTY directly without OS permission prompts.
+		if inst.Origin == agent.OriginExternal {
+			continue
+		}
+		out = append(out, a.toSession(inst))
+	}
+	// newest updated first
+	for i := 0; i < len(out)-1; i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j].UpdatedAt > out[i].UpdatedAt {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
+func (a *App) toSession(inst agent.Instance) Session {
+	prov, _ := a.providerByID(provider.ID(inst.ProviderID))
+	avatar := avatarLabel(inst.Title, prov.Name)
+	tag := prov.Tag
+	if tag == "" {
+		tag = strings.ToUpper(inst.ProviderID)
+	}
+	accent := prov.Accent
+	if accent == "" {
+		accent = "#5b6675"
+	}
+	external := externalAttachCommand(inst)
+	last := inst.LastMessage
+	if last == "" && len(inst.Messages) > 0 {
+		last = inst.Messages[len(inst.Messages)-1].Text
+	}
+	if last == "" && inst.Origin == agent.OriginExternal {
+		last = "Sessao externa detectada. Aguardando primeira resposta."
+	}
+
+	return Session{
+		ID:               inst.ID,
+		Title:            inst.Title,
+		Topic:            inst.Topic,
+		ProviderID:       inst.ProviderID,
+		ProviderTag:      tag,
+		ProviderAccent:   accent,
+		Origin:           inst.Origin,
+		Status:           inst.Status,
+		CWD:              inst.CWD,
+		AvatarLabel:      avatar,
+		LastMessage:      last,
+		CurrentTool:      inst.CurrentTool,
+		ProcessID:        inst.PID,
+		TTY:              inst.TTY,
+		ClaudeSessionID:  inst.ClaudeSessionID,
+		ExternalAttach:   external,
+		CreatedAt:        inst.CreatedAt,
+		UpdatedAt:        inst.UpdatedAt,
+		Messages:         append([]agent.Message(nil), inst.Messages...),
+		PendingQuestion:  inst.PendingQuestion,
+		PendingActions:   append([]agent.PendingAction(nil), inst.PendingActions...),
+		TerminalAttached: inst.TerminalAttached,
+		TranscriptPath:   inst.TranscriptPath,
+	}
+}
+
+func (a *App) emitState() {
+	if a.ctx == nil {
+		return
+	}
+	wailsruntime.EventsEmit(a.ctx, "state:update", a.bootstrap())
+}
+
 func (a *App) providerByID(id provider.ID) (provider.Provider, bool) {
 	for _, item := range a.providers {
 		if item.ID == id {
@@ -262,449 +671,58 @@ func (a *App) providerByID(id provider.ID) (provider.Provider, bool) {
 	return provider.Provider{}, false
 }
 
-func (a *App) handleTerminalOutput(sessionID string, raw string) {
-	_, _ = a.registry.AppendTerminalOutput(sessionID, raw)
-	if view := terminalViewText(raw); view != "" {
-		_, _ = a.registry.AppendTerminalView(sessionID, view)
-		if question, actions, ok := detectPendingActions(view); ok {
-			_, _ = a.registry.SetPendingPrompt(sessionID, question, actions)
-			_, _ = a.registry.SetStatus(sessionID, session.Waiting, "permissao")
-		}
-	}
-	current, ok := a.registry.Get(sessionID)
-	if ok && current.Status == session.Busy && current.ProviderID != provider.Claude {
-		a.outputs.add(sessionID, raw, func(text string) {
-			if text == "" {
-				a.emitState()
-				return
-			}
-			if len(text) > 4000 {
-				text = text[:4000] + "\n[saida truncada]"
-			}
-			_, _ = a.registry.AppendAssistant(sessionID, text)
-			_, _ = a.registry.SetStatus(sessionID, session.Idle, "")
-			a.emitState()
-		})
-		return
-	}
-	a.emitState()
-}
+// ---------------------------------------------------------------------------
+// Provider-specific args / external attach
+// ---------------------------------------------------------------------------
 
-func (a *App) handleTerminalExit(sessionID string, err error) {
-	a.outputs.flush(sessionID, func(text string) {
-		if text != "" {
-			_, _ = a.registry.AppendAssistant(sessionID, text)
-		}
-	})
-	_, _ = a.registry.SetTerminal(sessionID, false, 0)
-	status := "Processo encerrado."
-	if err != nil {
-		status = "Processo encerrado: " + err.Error()
-	}
-	_, _ = a.registry.SetLastMessage(sessionID, status)
-	_, _ = a.registry.SetStatus(sessionID, session.Offline, "")
-	a.emitState()
-}
-
-func (a *App) subscribeHost(sessionID string) {
-	go func() {
-		err := a.host.Subscribe(context.Background(), sessionID, func(event hostclient.Event) {
-			switch event.Type {
-			case "output":
-				a.handleTerminalOutput(sessionID, string(event.Data))
-			case "chat":
-				text := strings.TrimSpace(string(event.Data))
-				if text != "" {
-					_, _, _ = a.registry.AppendAssistantIfNew(sessionID, text)
-					_, _ = a.registry.SetStatus(sessionID, session.Idle, "")
-					a.emitState()
-				}
-			case "question":
-				question := strings.TrimSpace(string(event.Data))
-				if question != "" {
-					_, _ = a.registry.SetPendingPrompt(sessionID, question, []session.PendingAction{
-						{ID: "accept", Label: "Aceitar", Input: ""},
-						{ID: "yes", Label: "Sim", Input: "y"},
-						{ID: "no", Label: "Nao", Input: "n"},
-					})
-					_, _ = a.registry.SetStatus(sessionID, session.Waiting, "permissao")
-					a.emitState()
-				}
-			case "exit":
-				a.handleTerminalExit(sessionID, nil)
-			}
-		})
-		if err != nil {
-			_, _ = a.registry.SetTerminal(sessionID, false, 0)
-			_, _ = a.registry.SetStatus(sessionID, session.Waiting, "")
-			_, _ = a.registry.SetLastMessage(sessionID, "Conexao com agent-host perdida.")
-			a.emitState()
-		}
-	}()
-}
-
-func (a *App) runPrompt(sessionID string, text string) error {
-	item, ok := a.registry.Get(sessionID)
-	if !ok {
-		return errors.New("session not found")
-	}
-	provider, ok := a.providerByID(item.ProviderID)
-	if !ok {
-		return errors.New("provider not found")
-	}
-
-	if !item.TerminalAttached {
-		pid, err := a.startTerminalSession(sessionID, provider, item.CWD)
-		if err != nil {
-			return errors.New("agent-host nao iniciou o terminal: " + err.Error())
-		}
-		_, _ = a.registry.SetTerminal(sessionID, true, pid)
-		_, _ = a.registry.SetExternalAttach(sessionID, "agentctl attach "+sessionID)
-		a.outputs.register(sessionID)
-		a.subscribeHost(sessionID)
-	}
-
-	_, _ = a.registry.SetExternalAttach(sessionID, "agentctl attach "+sessionID)
-	_, _ = a.registry.SetLastMessage(sessionID, "Executando no terminal local.")
-	a.emitState()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := a.host.Send(ctx, sessionID, text); err != nil {
-		if pid, startErr := a.startTerminalSession(sessionID, provider, item.CWD); startErr == nil {
-			_, _ = a.registry.SetTerminal(sessionID, true, pid)
-			_, _ = a.registry.SetExternalAttach(sessionID, "agentctl attach "+sessionID)
-			a.outputs.register(sessionID)
-			a.subscribeHost(sessionID)
-			time.Sleep(200 * time.Millisecond)
-			err = a.host.Send(ctx, sessionID, text)
-		}
-		if err != nil {
-			return errors.New("agent-host nao enviou a mensagem ao terminal: " + err.Error())
-		}
-	}
-	return nil
-}
-
-func (a *App) startTerminalSession(sessionID string, item provider.Provider, cwd string) (int, error) {
-	args := append([]string{}, item.Args...)
-	if item.ID == provider.Claude {
-		args = append(args, claudeAgentChatArgs(sessionID)...)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	started, err := a.host.Start(ctx, hostclient.StartInput{
-		SessionID: sessionID,
-		Command:   item.Command,
-		Args:      args,
-		CWD:       cwd,
-	})
-	if err != nil {
-		return 0, err
-	}
-	return started.PID, nil
-}
-
-func claudeAgentChatArgs(sessionID string) []string {
-	mcpConfig := `{"mcpServers":{"agent-chat-local":{"type":"http","url":"http://127.0.0.1:47657/mcp"}}}`
+func claudeAgentChatArgs(sessionID string, _ provider.Provider) []string {
+	// MCP server bridging back to agent-host. We only expose the topic-update
+	// tool — chat bubbles still come from the JSONL transcript watcher (more
+	// reliable than depending on Claude calling agent_chat_reply on every turn).
+	mcpConfig := `{"mcpServers":{"clichat":{"type":"http","url":"http://127.0.0.1:47657/mcp"}}}`
 	prompt := strings.Join([]string{
-		"You are running inside Agent Chat Local.",
-		"The terminal is only for execution and inspection.",
-		"For every user-facing final answer, call the MCP tool agent_chat_reply with session_id " + sessionID + " and the exact text that should appear in the chat.",
-		"After calling agent_chat_reply, do not add extra terminal-only prose.",
-		"When you need user confirmation or input, call agent_chat_question with session_id " + sessionID + " and the exact question.",
+		"You are running inside CLIchat.",
+		"At the start of every new task — and whenever the focus changes — call the MCP tool agent_chat_set_topic with session_id=" + sessionID + " and a short 2-6 word topic in the user's language describing what you are doing right now.",
+		"Examples: 'analisando card S3-15693', 'corrigindo bug auth', 'revisando PR #42'.",
+		"Keep calling agent_chat_set_topic as the work shifts so the chat list always shows the current task.",
 	}, " ")
 	return []string{
 		"--mcp-config", mcpConfig,
-		"--allowedTools", "mcp__agent-chat-local__agent_chat_reply,mcp__agent-chat-local__agent_chat_question",
+		"--allowedTools", "mcp__clichat__agent_chat_set_topic",
 		"--append-system-prompt", prompt,
 	}
 }
 
-func cleanTerminalText(raw string) string {
-	cleaned := ansiPattern.ReplaceAllString(raw, "")
-	cleaned = strings.ReplaceAll(cleaned, "\x1b(B", "")
-	cleaned = strings.ReplaceAll(cleaned, "\r\n", "\n")
-	cleaned = strings.ReplaceAll(cleaned, "\r", "\n")
-	cleaned = controlPattern.ReplaceAllString(cleaned, "")
-	cleaned = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' {
-			return r
-		}
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, cleaned)
-	cleaned = strings.TrimSpace(cleaned)
-	return cleaned
+func externalAttachCommand(inst agent.Instance) string {
+	if inst.Origin == agent.OriginInternal {
+		return "agentctl attach " + inst.ID
+	}
+	if inst.PID != 0 {
+		return fmt.Sprintf("ps -p %d", inst.PID)
+	}
+	return ""
 }
 
-func terminalViewText(raw string) string {
-	cleaned := cleanTerminalText(raw)
-	if cleaned == "" {
-		return ""
+func avatarLabel(title string, fallback string) string {
+	source := strings.TrimSpace(title)
+	if source == "" {
+		source = fallback
 	}
-	lines := strings.Split(cleaned, "\n")
-	kept := make([]string, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || isCursorOnlyLine(line) {
-			continue
-		}
-		kept = append(kept, line)
+	parts := strings.Fields(source)
+	if len(parts) == 0 {
+		return "AI"
 	}
-	return strings.TrimSpace(strings.Join(kept, "\n"))
+	if len(parts) == 1 {
+		return strings.ToUpper(firstRune(parts[0]))
+	}
+	return strings.ToUpper(firstRune(parts[0]) + firstRune(parts[1]))
 }
 
-func isCursorOnlyLine(line string) bool {
-	trimmed := strings.Trim(line, " \t0123456789;[]ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
-	return trimmed == ""
-}
-
-func detectPendingActions(text string) (string, []session.PendingAction, bool) {
-	lower := strings.ToLower(text)
-	patterns := []string{
-		"do you trust",
-		"permission",
-		"permissions",
-		"allow",
-		"accept",
-		"approve",
-		"proceed",
-		"continue?",
-		"press enter",
-		"workspace",
+func firstRune(value string) string {
+	for _, r := range value {
+		return string(r)
 	}
-	found := false
-	for _, pattern := range patterns {
-		if strings.Contains(lower, pattern) {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return "", nil, false
-	}
-
-	question := lastMeaningfulLines(text, 4)
-	if question == "" {
-		question = "O terminal esta aguardando confirmacao."
-	}
-	return question, []session.PendingAction{
-		{ID: "accept", Label: "Aceitar", Input: ""},
-		{ID: "yes", Label: "Sim", Input: "y"},
-		{ID: "no", Label: "Nao", Input: "n"},
-	}, true
-}
-
-func lastMeaningfulLines(text string, limit int) string {
-	lines := strings.Split(cleanTerminalText(text), "\n")
-	kept := make([]string, 0, limit)
-	for i := len(lines) - 1; i >= 0 && len(kept) < limit; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" || shouldDropTerminalLine(line, "") {
-			continue
-		}
-		kept = append([]string{line}, kept...)
-	}
-	return strings.TrimSpace(strings.Join(kept, "\n"))
-}
-
-type outputFilter struct {
-	mu      sync.Mutex
-	buffers map[string]string
-	inputs  map[string]string
-	timers  map[string]*time.Timer
-}
-
-func newOutputFilter() *outputFilter {
-	return &outputFilter{
-		buffers: make(map[string]string),
-		inputs:  make(map[string]string),
-		timers:  make(map[string]*time.Timer),
-	}
-}
-
-func (f *outputFilter) register(sessionID string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.buffers[sessionID] = ""
-}
-
-func (f *outputFilter) rememberInput(sessionID string, text string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.inputs[sessionID] = strings.TrimSpace(text)
-}
-
-func (f *outputFilter) add(sessionID string, raw string, emit func(string)) {
-	cleaned := cleanTerminalText(raw)
-	if cleaned == "" {
-		return
-	}
-
-	f.mu.Lock()
-	f.buffers[sessionID] += "\n" + cleaned
-	if timer := f.timers[sessionID]; timer != nil {
-		timer.Stop()
-	}
-	f.timers[sessionID] = time.AfterFunc(2200*time.Millisecond, func() {
-		f.flush(sessionID, emit)
-	})
-	f.mu.Unlock()
-}
-
-func (f *outputFilter) flush(sessionID string, emit func(string)) {
-	f.mu.Lock()
-	buffer := f.buffers[sessionID]
-	f.buffers[sessionID] = ""
-	lastInput := f.inputs[sessionID]
-	if timer := f.timers[sessionID]; timer != nil {
-		timer.Stop()
-		delete(f.timers, sessionID)
-	}
-	f.mu.Unlock()
-
-	text := filterAssistantText(buffer, lastInput)
-	emit(text)
-}
-
-func filterAssistantText(raw string, lastInput string) string {
-	text := cleanTerminalText(raw)
-	if text == "" {
-		return ""
-	}
-
-	lines := strings.Split(text, "\n")
-	filtered := make([]string, 0, len(lines))
-	lastInput = strings.TrimSpace(lastInput)
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if shouldDropTerminalLine(line, lastInput) {
-			continue
-		}
-		line = normalizeAssistantLine(line)
-		if line == "" || shouldDropTerminalLine(line, lastInput) {
-			continue
-		}
-		filtered = append(filtered, line)
-	}
-
-	return strings.TrimSpace(strings.Join(filtered, "\n"))
-}
-
-func normalizeAssistantLine(line string) string {
-	line = strings.TrimSpace(line)
-	if strings.Contains(strings.ToLower(line), "tip: run claude") || strings.Contains(strings.ToLower(line), "claude--continue") {
-		if date := datePattern.FindString(line); date != "" {
-			return strings.TrimSpace(date)
-		}
-		return ""
-	}
-
-	chunks := strings.FieldsFunc(line, func(r rune) bool {
-		return r == '●' || r == '◉' || r == '◆' || r == '❯'
-	})
-	for i := len(chunks) - 1; i >= 0; i-- {
-		candidate := strings.TrimSpace(chunks[i])
-		if candidate != "" && hasLetterOrNumber(candidate) {
-			line = candidate
-			break
-		}
-	}
-
-	line = trailingTUIStatusPattern.ReplaceAllString(line, "")
-	line = strings.TrimLeft(line, "●◦•>›❯$✢✣✤✥✦✧✶✷✸✹✺✻✼✽✾✿*+· ")
-	line = strings.ReplaceAll(line, "cavemanmode", "caveman mode")
-	line = strings.ReplaceAll(line, "Cavemanmode", "Caveman mode")
-	line = strings.ReplaceAll(line, "Que tarefa?", "Que tarefa?")
-	line = trailingDecorPattern.ReplaceAllString(line, "")
-	line = strings.TrimSpace(line)
-	return line
-}
-
-func hasLetterOrNumber(line string) bool {
-	for _, r := range line {
-		if unicode.IsLetter(r) || unicode.IsNumber(r) {
-			return true
-		}
-	}
-	return false
-}
-
-func shouldDropTerminalLine(line string, lastInput string) bool {
-	if line == "" {
-		return true
-	}
-	if lastInput != "" && strings.EqualFold(strings.TrimSpace(line), lastInput) {
-		return true
-	}
-	if lastInput != "" {
-		withoutPrompt := strings.TrimLeft(line, ">› $")
-		if strings.EqualFold(strings.TrimSpace(withoutPrompt), lastInput) {
-			return true
-		}
-	}
-
-	trimmed := strings.Trim(line, " .-|+=_*")
-	if trimmed == "" {
-		return true
-	}
-	if strings.ContainsAny(line, "╭╮╰╯│─┌┐└┘├┤┬┴┼▗▖▘▝◉❯◆�") {
-		return true
-	}
-
-	drops := []string{
-		"? for shortcuts",
-		"shortcuts",
-		"esc to interrupt",
-		"esctointerrupt",
-		"ctrl+c",
-		"ctrl+d",
-		"press enter",
-		"thinking",
-		"tinkering",
-		"composing",
-		"cwd:",
-		"welcome back",
-		"welcomeback",
-		"what's new",
-		"whatsnew",
-		"tips for getting started",
-		"tipsforgettingstarted",
-		"run /init",
-		"run/init",
-		"release-notes",
-		"mcp server failed",
-		"mcpserver failed",
-		"mcpserverfailed",
-		"running stop hooks",
-		"tokens)",
-		"claude code",
-		"claudecode",
-		"esc to interrupt",
-		"baked for",
-		"effort",
-		"processing",
-		"processando",
-		"creating",
-		"running sp hooks",
-		"sp hooks",
-		"worked for",
-		"tip: run claude",
-		"resume to resume",
-		"continuetoresume",
-		"continueorclaude",
-	}
-	lower := strings.ToLower(line)
-	for _, drop := range drops {
-		if strings.Contains(lower, drop) {
-			return true
-		}
-	}
-	return false
+	return ""
 }
 
 func openExternalTerminal(command string) error {
@@ -726,6 +744,122 @@ func openExternalTerminal(command string) error {
 	default:
 		return errors.New("abrir terminal externo nao suportado neste sistema")
 	}
+}
+
+// openTerminalRunning opens a fresh OS-native terminal window and runs `command`
+// inside it (typically `claude`). On macOS uses Terminal.app via AppleScript so
+// the window stays open after Claude exits.
+func openTerminalRunning(command string, cwd string) error {
+	if command == "" {
+		return errors.New("comando vazio")
+	}
+	full := command
+	if strings.TrimSpace(cwd) != "" {
+		full = "cd " + shellQuote(cwd) + " && " + command
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		// Open without `activate` and immediately miniaturize so the new window
+		// does not steal focus. User can bring it back via the Focus button.
+		script := `tell application "Terminal"
+	do script "` + escapeAppleScript(full) + `"
+	delay 0.1
+	try
+		set miniaturized of front window to true
+	end try
+end tell`
+		return exec.Command("osascript", "-e", script).Run()
+	default:
+		return openExternalTerminal(full)
+	}
+}
+
+// focusTerminalForSession brings the OS terminal window/tab serving this session to the front.
+func focusTerminalForSession(tty string, pid int) error {
+	switch runtime.GOOS {
+	case "darwin":
+		if strings.HasPrefix(tty, "/dev/") {
+			tty = strings.TrimPrefix(tty, "/dev/")
+		}
+		var script string
+		if tty != "" {
+			script = `tell application "Terminal"
+	activate
+	repeat with w in windows
+		repeat with t in tabs of w
+			try
+				if (tty of t) ends with "` + escapeAppleScript(tty) + `" then
+					if miniaturized of w then set miniaturized of w to false
+					set selected of t to true
+					set frontmost of w to true
+					set index of w to 1
+					return
+				end if
+			end try
+		end repeat
+	end repeat
+end tell`
+		} else {
+			script = `tell application "Terminal" to activate`
+		}
+		return exec.Command("osascript", "-e", script).Run()
+	case "linux", "windows":
+		return errors.New("focar terminal externo ainda nao suportado neste sistema")
+	default:
+		return errors.New("plataforma nao suportada")
+	}
+}
+
+func escapeAppleScript(text string) string {
+	text = strings.ReplaceAll(text, "\\", "\\\\")
+	text = strings.ReplaceAll(text, "\"", "\\\"")
+	return text
+}
+
+// sendToExternalTerminal injects `text` (plus a return) into the OS terminal that
+// hosts this session. Preferred path is TIOCSTI on the pty — silent, no focus,
+// no window pop. Falls back to AppleScript keystrokes if TIOCSTI is unavailable
+// (e.g. SIP/sandbox), in which case the Terminal window may steal focus once.
+func sendToExternalTerminal(tty string, text string) error {
+	if strings.TrimSpace(tty) == "" {
+		return errors.New("sessao sem tty conhecido — abra/foque o terminal antes")
+	}
+	if err := injectIntoTTY(tty, text); err == nil {
+		return nil
+	} else {
+		// fall through to AppleScript
+		_ = err
+	}
+	if runtime.GOOS != "darwin" {
+		return errors.New("envio para terminal externo nao suportado neste sistema")
+	}
+
+	short := strings.TrimPrefix(tty, "/dev/")
+	var script strings.Builder
+	script.WriteString(`tell application "Terminal"
+	repeat with w in windows
+		repeat with t in tabs of w
+			try
+				if (tty of t) ends with "` + escapeAppleScript(short) + `" then
+					set selected of t to true
+					set frontmost of w to true
+				end if
+			end try
+		end repeat
+	end repeat
+end tell
+tell application "System Events"
+	set frontmost of process "Terminal" to true
+`)
+	for _, line := range strings.Split(text, "\n") {
+		if line != "" {
+			script.WriteString(`	keystroke "` + escapeAppleScript(line) + `"` + "\n")
+		}
+		script.WriteString("\tkeystroke return\n")
+	}
+	script.WriteString("end tell\n")
+
+	return exec.Command("osascript", "-e", script.String()).Run()
 }
 
 func openMacTerminal(command string) error {
@@ -756,7 +890,7 @@ func openMacTerminal(command string) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(path, 0700); err != nil {
+	if err := os.Chmod(path, 0o700); err != nil {
 		return err
 	}
 	return exec.Command("open", path).Start()
@@ -764,24 +898,4 @@ func openMacTerminal(command string) error {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
-func (a *App) bootstrap() Bootstrap {
-	var selected *session.Session
-	if item, ok := a.registry.Selected(); ok {
-		selected = &item
-	}
-	return Bootstrap{
-		Providers: a.providers,
-		Sessions:  a.registry.List(),
-		Selected:  selected,
-		Mirror:    a.MirrorStatus(),
-	}
-}
-
-func (a *App) emitState() {
-	if a.ctx == nil {
-		return
-	}
-	wailsruntime.EventsEmit(a.ctx, "state:update", a.bootstrap())
 }
