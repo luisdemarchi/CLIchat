@@ -13,7 +13,7 @@ App desktop (macOS-first) estilo WhatsApp Web pra leigo conversar com Claude Cod
 
 ```
 ┌─────────────────┐  HTTP/SSE  ┌─────────────────────┐
-│ AgentChatLocal  │ ─────────▶ │      agent-host     │
+│ AgentChatLocal  │ ─────────▶ │      clichat-host     │
 │ (Wails desktop) │            │    daemon Go puro   │
 └─────────────────┘            │  • PTY manager      │
                                │  • SSE state stream │
@@ -26,14 +26,14 @@ App desktop (macOS-first) estilo WhatsApp Web pra leigo conversar com Claude Cod
                             agentctl hook session-start|...
 ```
 
-- `agent-host` em `127.0.0.1:47657` (HTTP) + `:47656` (TCP attach). Persiste em `~/.clichat/state.json`.
+- `clichat-host` em `127.0.0.1:47657` (HTTP) + `:47656` (TCP attach). Persiste em `~/.clichat/state.json`.
 - `agentctl` CLI: `attach <id>`, `hook *`, `install-hooks`, `uninstall-hooks`, `list`, `register`.
 - Wails app: thin client; consome `/v1/state/events` SSE.
 
 ## Principais arquivos
 ```
 clichat/
-├── cmd/agent-host/main.go           # daemon HTTP + MCP + endpoints REST
+├── cmd/clichat-host/main.go           # daemon HTTP + MCP + endpoints REST
 ├── cmd/agentctl/main.go             # CLI hooks + install
 ├── cmd/agent-test/main.go           # E2E smoke test
 ├── internal/agent/
@@ -70,7 +70,7 @@ clichat/
 3. **Layout refinements** — Ajustar o scroll do xterm.js para ser mais fluido com o backfill do buffer.
 
 ## O que JÁ funcionava (validado E2E)
-1. **Spawn dos 3 CLIs em PTY oculto** — `agent-host` cria internal instance + start-terminal com command/args/env/cwd.
+1. **Spawn dos 3 CLIs em PTY oculto** — `clichat-host` cria internal instance + start-terminal com command/args/env/cwd.
 2. **Submit "oi" + Enter universal** — `internal/terminal/process_unix.go` `SendLine`:
    ```
    write \x1b[I    # Focus In (re-arma TUIs com focus tracking)
@@ -98,7 +98,7 @@ User diz que mesmo após meus fixes, no app real:
 - Claude às vezes não responde
 
 E2E (`/tmp/agent-test`) bate path **idêntico** ao Wails app (`POST /v1/instances`, `POST /start-terminal`, `POST /send`) e passa 5/5. Suspeito que:
-- **App rodando build antigo** — toda mudança no daemon PTY exige só rebuild do agent-host, mas mudanças de Wails frontend exigem `wails build -clean` + `open -a` do .app.
+- **App rodando build antigo** — toda mudança no daemon PTY exige só rebuild do clichat-host, mas mudanças de Wails frontend exigem `wails build -clean` + `open -a` do .app.
 - **Cache do Wails frontend** — vite/wails embedam JS+CSS dentro do .app. Update de styles.css/App.tsx só aparece após `wails build -clean` + relaunch.
 
 ## E2E test harness
@@ -125,7 +125,7 @@ E2E (`/tmp/agent-test`) bate path **idêntico** ao Wails app (`POST /v1/instance
 cd /Users/luis/projetos/pessoal/clichat
 
 # build
-go build -o ~/.local/bin/agent-host ./cmd/agent-host
+go build -o ~/.local/bin/clichat-host ./cmd/clichat-host
 go build -o ~/.local/bin/agentctl ./cmd/agentctl
 ~/go/bin/wails build -clean
 
@@ -133,7 +133,7 @@ go build -o ~/.local/bin/agentctl ./cmd/agentctl
 ~/.local/bin/agentctl install-hooks
 
 # daemon (pode rodar via launchd ~/Library/LaunchAgents/com.clichat.host.plist)
-nohup ~/.local/bin/agent-host serve > ~/.clichat/logs/host.out.log 2>&1 &
+nohup ~/.local/bin/clichat-host serve > ~/.clichat/logs/host.out.log 2>&1 &
 
 # app
 open -a /Users/luis/projetos/pessoal/clichat/build/bin/clichat.app
@@ -145,7 +145,7 @@ go build -o /tmp/agent-test ./cmd/agent-test
 
 ## Estado dos processos
 ```
-agent-host PID dinâmico em 127.0.0.1:47657
+clichat-host PID dinâmico em 127.0.0.1:47657
 AgentChatLocal.app PID dinâmico
 state em ~/.clichat/state.json
 hooks em ~/.claude/settings.json (5 entries `_managedBy: agentctl-managed`)

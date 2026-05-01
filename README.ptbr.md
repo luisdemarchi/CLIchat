@@ -52,7 +52,7 @@ Feito no Brasil 🇧🇷 por [@luisdemarchi](https://github.com/luisdemarchi).
 
 ```
 ┌─────────────────────┐  HTTP / SSE  ┌──────────────────────────┐
-│  CLIchat desktop    │ ────────────▶│       agent-host         │
+│  CLIchat desktop    │ ────────────▶│       clichat-host         │
 │  (Wails Go + React) │ ◀────────────│   (daemon, fonte única   │
 └─────────────────────┘              │    de verdade)           │
                                      │                          │
@@ -71,7 +71,7 @@ Três binários:
 
 - **`clichat`** (`main.go` + `internal/app`) — app desktop Wails. Cliente
   thin.
-- **`agent-host`** (`cmd/agent-host`) — daemon em `127.0.0.1:47657` (HTTP) e
+- **`clichat-host`** (`cmd/clichat-host`) — daemon em `127.0.0.1:47657` (HTTP) e
   `:47656` (TCP attach). Dono de todos os PTYs e do estado persistente
   em `~/.clichat/state.json`.
 - **`agentctl`** (`cmd/agentctl`) — CLI usado pelos hooks do Claude Code
@@ -108,7 +108,7 @@ cd CLIchat
 
 O instalador faz, em ordem:
 
-1. **Compila `agent-host` e `agentctl`** em `~/.local/bin/`.
+1. **Compila `clichat-host` e `agentctl`** em `~/.local/bin/`.
 2. **Instala os hooks do Claude Code** em `~/.claude/settings.json`
    (`SessionStart`, `Stop`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`)
    pra que toda sessão Claude — mesmo as abertas fora do app — reporte
@@ -129,7 +129,7 @@ Re-rodar `./scripts/install.sh` é idempotente.
 - Linux: rode `~/.local/share/clichat/CLIchat`.
 
 Na primeira abertura o daemon pode levar alguns segundos pra registrar.
-O header fica *"agent-host online."* assim que estiver pronto.
+O header fica *"clichat-host online."* assim que estiver pronto.
 
 ### 2. Iniciar uma nova conversa
 
@@ -163,7 +163,7 @@ de leitura.
 
 ### 5. Fechar e reabrir sem perder contexto
 
-- O daemon (`agent-host`) continua rodando em background, então os PTYs
+- O daemon (`clichat-host`) continua rodando em background, então os PTYs
   ficam vivos quando você fecha o app.
 - Se você matar o daemon de fato, na próxima abertura o CLIchat
   re-spawna cada chat interno com `claude --resume <session-id>` (Claude)
@@ -175,7 +175,7 @@ de leitura.
 agentctl list            # lista as conversas que o daemon conhece
 agentctl install-hooks   # reescreve os hooks do Claude Code (idempotente)
 agentctl uninstall-hooks # remove só os hooks
-agent-host serve         # roda o daemon manualmente (debug)
+clichat-host serve         # roda o daemon manualmente (debug)
 ```
 
 Estado em `~/.clichat/state.json`. Logs em `~/.clichat/logs/`.
@@ -206,7 +206,7 @@ cd frontend && pnpm install && cd ..
 Em outro terminal:
 
 ```bash
-~/.local/bin/agent-host serve  # daemon (porta 47657)
+~/.local/bin/clichat-host serve  # daemon (porta 47657)
 ```
 
 Smoke test:

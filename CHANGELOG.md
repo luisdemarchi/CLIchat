@@ -4,6 +4,39 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-01
+
+### Added
+- **Swipe-to-delete** chat in the sidebar: drag a chat row to the left past ~130px → confirm dialog → `App.DeleteSession` (DELETE `/v1/instances/{id}` → manager.Stop + store.Unregister). New `chat-row-bg` strip with red gradient + Trash2 icon underneath.
+- **Reconnect on click**: clicking an offline chat row triggers `App.ReconnectSession(id)` automatically — respawns the CLI with `claude --resume <id>` / `codex resume --last` / gemini fresh. Frontend `lib/api.ts reconnectSession()` + bridge.
+- **PTY resize sync**: new `POST /v1/instances/{id}/resize {cols, rows}` endpoint backed by `pty.Setsize`. `TerminalPane.tsx` calls `resizeTerminal()` on every `fit.fit()` so the embedded xterm and the underlying TUI agree on dimensions; no more clipped Claude/Codex layouts.
+- **Stop button** next to the busy status pill (red Square icon). Sends `\x1b` (ESC) via `sendTerminalInput` to interrupt the running CLI.
+- **Bubble font zoom**: 5 levels (0.85 / 0.95 / 1.0 / 1.15 / 1.3) via `--wa-bubble-scale`. ZoomIn/ZoomOut buttons in the sidebar header. Keyboard shortcuts `Cmd +`, `Cmd -`, `Cmd 0`. Persisted in `localStorage`.
+- **Sandbox CWD default** for spawned CLIs: `~/.clichat/sandbox` is created on demand and used whenever the chat CWD is empty *or* `$HOME`. Prevents Claude/Codex/Gemini from scanning `~/Library/CloudStorage/*` and triggering macOS TCC prompts (Apple Music, Google Drive, iCloud Drive…). Older instances created with `cwd=$HOME` are auto-migrated on next reconnect.
+- **launchd persistence** + control script:
+  - `~/Library/LaunchAgents/com.clichat.host.plist` keeps the daemon running with `KeepAlive=true`, `RunAtLoad=true`, `ThrottleInterval=5`. Logs in `~/.clichat/logs/host.{out,err}.log`.
+  - `~/.local/bin/clichat`: `start | stop | restart | status | logs | rebuild | daemon-only`.
+  - `clichat rebuild` now also codesigns the daemon ad-hoc with stable identifier `com.clichat.host` so macOS TCC decisions persist between rebuilds.
+- **Codesign + entitlements**: ad-hoc signing of `clichat-host` via `build/clichat-host.entitlements.plist` (explicit-deny for media-library, music/movies/pictures/photos, audio-input, camera, calendars, addressbook, location). Identifier stable, so `Não Permitir` decisions in TCC stick across rebuilds.
+- **System-event filter**: transcript watcher now drops bubbles whose body starts with `<task-notification>`, `<system-reminder>`, `<command-name>`, `<command-message>`, `<command-args>`, `<local-command-stdout>`, `<local-command-stderr>`, `<user-prompt-submit-hook>`, `<bash-input>`, `<bash-stdout>`, `<bash-stderr>`, `<bash-stdin-disabled>`, `<function_calls>`, `<function_results>` (`internal/agent/transcript_filter_test.go` covers the cases). Real Claude messages stay; plumbing XML stays out of the chat UI.
+
+### Changed
+- **Backend renamed** `agent-host` → `clichat-host` everywhere: source dir (`cmd/agent-host` → `cmd/clichat-host`), binary (`~/.local/bin/clichat-host`), launchd plist payload, log strings, error messages in `internal/app/app.go`, README/CHANGELOG/ARCHITECTURE/HANDOFF.
+- **Auto-reconnect now retries fresh** when the resume hint fails (`codex resume --last` → no rollout / locked, `claude --resume <id>` → session UUID gone). Reconnect timeout bumped 5s → 30s; success/failure logged (`reconnect-ok / reconnect-failed / reconnect-retry-fresh`).
+- **`SendMessage` timeout** 5s → 30s (Codex/Claude take longer to settle).
+- **Composer**: no longer blocks input while the agent is busy — CLIs accept concurrent input. `canSend` now only depends on `terminalAttached && status !== 'offline'`. Disabled state has clear visual: opacity 0.5 + italic placeholder + `cursor: not-allowed`. Placeholder reads "Chat offline — clique no chat para reconectar".
+- **Sidebar row snippet** no longer duplicates the topic — when `lastMessage === topic`, falls back to the live status label.
+- **`markBootOffline`** now forces `Status=Offline + TerminalAttached=false` for **all** internal instances at boot; previously stale `terminalAttached=true` rows were skipped by `tryAutoReconnect` and stayed frozen.
+- **Embedded terminal hardened**: light + dark themes synced with `data-theme` via `MutationObserver`, dynamic cols/rows from `FitAddon.fit()` (was 120 cols fixed), sticky-bottom (only auto-scroll when user is already at the bottom), scrollback 10k → 20k, smooth scroll 80ms, `cursorStyle: 'block'`, `macOptionIsMeta`, `rightClickSelectsWord`. CSS overrides `.terminal-panel` + `.xterm-shell` for both themes.
+
+### Fixed
+- **Claude rate-limit menu** now surfaces as a prompt-card bubble. The numbered-option regex no longer requires the cursor glyph (`›`) on every line — Claude only marks the selected option. New `cursorOption` gate plus expanded trigger phrases (`what do you want to do`, `what would you like to do`, `enter to confirm`, `esc to cancel`).
+- **macOS TCC prompts (Music, Desktop, iCloud, Documents…)** at chat creation: voicemode MCP removed (`claude mcp remove voicemode` + `~/.claude/settings.local.json` permission entries deleted) — was the original culprit. Combined with the sandbox CWD default + codesign-stable identifier, prompts no longer appear on each rebuild.
+- **`stateEvents` daemon panic** (`send on closed channel`) when an SSE client disconnected mid-broadcast: listener callback now uses `defer recover()` and defers reordered (`unsubscribe` before `close(out)`).
+
+### Removed
+- **voicemode MCP** unregistered from Claude Code (originally responsible for the Apple Music TCC prompt). Settings cleaned: `mcp__voicemode__converse` and `mcp__voicemode__service` permissions dropped from `~/.claude/settings.local.json`.
+
 ## [0.2.0] - 2026-04-29
 
 ### Added
@@ -25,10 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial open-source release as **CLIchat**.
 - Wails (Go + React 19) desktop app: WhatsApp-style sidebar, conversation panel with markdown bubbles, embedded `xterm.js` terminal per chat.
-- `agent-host` daemon: PTY manager, SSE state stream, MCP HTTP, prompt detector, JSONL transcript watcher, JSON state file.
+- `clichat-host` daemon: PTY manager, SSE state stream, MCP HTTP, prompt detector, JSONL transcript watcher, JSON state file.
 - Discovery of running Claude sessions via `~/.claude/projects/*/*.jsonl`.
 - Hooks installed by `agentctl install-hooks` (`SessionStart`, `Stop`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`).
 - README in EN and PT-BR with prerequisites, install steps and troubleshooting.
 
+[0.3.0]: https://github.com/luisdemarchi/CLIchat/releases/tag/v0.3.0
 [0.2.0]: https://github.com/luisdemarchi/CLIchat/releases/tag/v0.2.0
 [0.1.0]: https://github.com/luisdemarchi/CLIchat/releases/tag/v0.1.0

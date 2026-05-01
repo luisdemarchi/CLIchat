@@ -123,6 +123,13 @@ func (p *Process) Write(data []byte) error {
 	return err
 }
 
+func (p *Process) Resize(cols, rows uint16) error {
+	if cols == 0 || rows == 0 {
+		return nil
+	}
+	return pty.Setsize(p.pty, &pty.Winsize{Rows: rows, Cols: cols})
+}
+
 func (p *Process) PID() int {
 	if p.cmd != nil && p.cmd.Process != nil {
 		return p.cmd.Process.Pid

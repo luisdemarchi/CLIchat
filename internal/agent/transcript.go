@@ -4,12 +4,59 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+func shortID(id string) string {
+	if len(id) >= 8 {
+		return id[:8]
+	}
+	return id
+}
+
+func watcherLog(format string, args ...interface{}) {
+	log.Printf(format, args...)
+}
+
+func safeID(id string) string { return shortID(id) }
+
+// systemContentTag matches a leading XML-ish tag that Claude Code injects into
+// the transcript for plumbing (background task results, hook output, slash
+// commands, etc). When a transcript entry starts with one of these tags we
+// drop it instead of rendering it as a user/assistant bubble.
+var systemContentTag = regexp.MustCompile(`(?s)^\s*<([a-z][a-z0-9-]*)>`)
+
+var systemTagSet = map[string]struct{}{
+	"task-notification":       {},
+	"system-reminder":         {},
+	"command-name":            {},
+	"command-message":         {},
+	"command-args":            {},
+	"local-command-stdout":    {},
+	"local-command-stderr":    {},
+	"user-prompt-submit-hook": {},
+	"bash-input":              {},
+	"bash-stdout":             {},
+	"bash-stderr":             {},
+	"bash-stdin-disabled":     {},
+	"function_calls":          {},
+	"function_results":        {},
+}
+
+func isSystemTranscriptEntry(text string) bool {
+	m := systemContentTag.FindStringSubmatch(text)
+	if m == nil {
+		return false
+	}
+	_, ok := systemTagSet[m[1]]
+	return ok
+}
 
 const maxTranscriptLine = 4 * 1024 * 1024
 
@@ -262,12 +309,21 @@ func (w *TranscriptWatcher) poll() {
 			if entry.Text == "" {
 				continue
 			}
+			if isSystemTranscriptEntry(entry.Text) {
+				continue
+			}
 			// Dedup within this cursor session
 			if cursor.seen[entry.Text] {
 				continue
 			}
 			cursor.seen[entry.Text] = true
 
+			preview := entry.Text
+			if len(preview) > 50 {
+				preview = preview[:50]
+			}
+			watcherLog("transcript→AppendMessage instance=%s provider=%s path=%s role=%s text=%q",
+				safeID(inst.ID), inst.ProviderID, filepath.Base(cursor.path), entry.Role, preview)
 			w.store.AppendMessage(inst.ID, AppendInput{Role: entry.Role, Text: entry.Text})
 			if entry.Role == RoleAssistant {
 				if entry.Tool != "" {

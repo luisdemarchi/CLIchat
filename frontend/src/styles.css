@@ -42,6 +42,7 @@
   --wa-composer-disabled-bg: #ebedf0;
   --wa-empty-overlay: rgba(242, 245, 247, 0.95);
   --wa-toggle-icon: #54656f;
+  --wa-bubble-scale: 1;
 
   font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Roboto,
     "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
@@ -337,6 +338,27 @@ select {
   background: var(--wa-panel-bg);
 }
 
+.chat-row-wrap {
+  position: relative;
+  overflow: hidden;
+}
+
+.chat-row-bg {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 22px;
+  background: linear-gradient(90deg, transparent, #c8231f 24%);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  pointer-events: none;
+}
+
 .chat-row {
   display: grid;
   width: 100%;
@@ -346,9 +368,15 @@ select {
   border: 0;
   padding: 11px 13px 11px 15px;
   text-align: left;
-  background: transparent;
+  background: var(--wa-panel-bg);
   border-bottom: 0;
   position: relative;
+  touch-action: pan-y;
+  transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.chat-row.swiping {
+  transition: none;
 }
 
 .chat-row::after {
@@ -650,7 +678,7 @@ select {
   word-wrap: break-word;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
-  font-size: 14.2px;
+  font-size: calc(14.2px * var(--wa-bubble-scale));
   line-height: 1.4;
   color: var(--wa-text-primary);
 }
@@ -750,7 +778,7 @@ select {
   border-radius: 4px;
   background: rgba(var(--wa-tint-fg), 0.08);
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 13px;
+  font-size: calc(13px * var(--wa-bubble-scale));
 }
 
 .bubble.user .bubble-content code {
@@ -764,7 +792,7 @@ select {
   background: rgba(var(--wa-tint-fg), 0.08);
   overflow-x: auto;
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--wa-bubble-scale));
   line-height: 1.4;
 }
 
@@ -846,11 +874,45 @@ select {
   float: right;
   margin: 6px -2px -4px 8px;
   color: var(--wa-text-tertiary);
-  font-size: 11px;
+  font-size: calc(11px * var(--wa-bubble-scale));
 }
 
 .bubble.user .meta {
   color: rgba(var(--wa-tint-fg), 0.45);
+}
+
+.status-pill-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  margin: 4px 0 0 4px;
+}
+
+.status-pill-wrap .status-pill {
+  margin: 0;
+}
+
+.status-stop {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 50%;
+  background: #e02e2a;
+  color: #ffffff;
+  cursor: pointer;
+  box-shadow: 0 1px 0.5px rgba(var(--wa-tint-fg), 0.15);
+  transition: background 0.12s ease, transform 0.05s ease;
+}
+
+.status-stop:hover {
+  background: #c8231f;
+}
+
+.status-stop:active {
+  transform: scale(0.92);
 }
 
 .status-pill {
@@ -1009,6 +1071,17 @@ select {
 .composer input:disabled {
   background: var(--wa-composer-disabled-bg);
   color: var(--wa-text-tertiary);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.composer input:disabled::placeholder {
+  color: var(--wa-text-tertiary);
+  font-style: italic;
+}
+
+.composer.disabled {
+  opacity: 0.7;
 }
 
 .composer .send-btn {
@@ -1020,10 +1093,16 @@ select {
   color: var(--wa-icon);
   display: grid;
   place-items: center;
+  transition: background 0.12s ease, opacity 0.12s ease;
 }
 
 .composer .send-btn:hover:not(:disabled) {
   background: rgba(var(--wa-tint-fg), 0.06);
+}
+
+.composer .send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* Empty state */
@@ -1072,6 +1151,12 @@ select {
   border-left: 1px solid var(--wa-border);
 }
 
+[data-theme='light'] .terminal-panel {
+  border-top-color: #d1d7db;
+  background: #fafafa;
+  color: #24292f;
+}
+
 .terminal-panel.hidden {
   display: none;
 }
@@ -1087,6 +1172,12 @@ select {
   font-size: 12.5px;
 }
 
+[data-theme='light'] .terminal-panel header {
+  background: #f0f2f5;
+  border-bottom-color: #d1d7db;
+  color: #24292f;
+}
+
 .terminal-panel header strong {
   font-weight: 500;
 }
@@ -1098,21 +1189,30 @@ select {
   background: #263142;
   color: #d6deeb;
   font-size: 11px;
+  cursor: pointer;
+}
+
+[data-theme='light'] .terminal-panel header button {
+  background: #e1e4e8;
+  color: #24292f;
 }
 
 .xterm-shell {
   min-height: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: hidden;
   padding: 6px 8px;
-  background: #0e1116;
+  background: var(--xterm-bg, #0e1116);
+}
+
+[data-theme='light'] .xterm-shell {
+  --xterm-bg: #fafafa;
 }
 
 .xterm-shell .xterm {
   height: 100%;
-  width: max-content;
+  width: 100%;
 }
 
 .xterm-shell .xterm-viewport {
-  background: #0e1116 !important;
+  background: transparent !important;
 }

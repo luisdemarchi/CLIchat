@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -126,7 +127,14 @@ func (s *Store) markBootOffline() {
 	defer s.mu.Unlock()
 	changed := false
 	for _, inst := range s.instances {
-		if inst.Origin == OriginInternal && inst.Status != StatusOffline {
+		if inst.Origin != OriginInternal {
+			continue
+		}
+		// Force offline + detach for ALL internal instances at boot. Without
+		// this guard, instances that had stale TerminalAttached=true are
+		// skipped by tryAutoReconnect and the user is left with a frozen
+		// chat (no PTY, no respawn).
+		if inst.Status != StatusOffline || inst.TerminalAttached {
 			inst.Status = StatusOffline
 			inst.TerminalAttached = false
 			inst.UpdatedAt = timestamp()
@@ -609,6 +617,11 @@ func (s *Store) AppendMessage(id string, input AppendInput) (Instance, bool, boo
 	if !ok {
 		return Instance{}, false, false
 	}
+	preview := text
+	if len(preview) > 60 {
+		preview = preview[:60]
+	}
+	log.Printf("AppendMessage id=%s provider=%s role=%s text=%q", shortID(id), inst.ProviderID, input.Role, preview)
 	// Dedup against the last 30 messages to absorb the case where the same message
 	// arrives both via direct API (user/assistant) and via the JSONL transcript watcher.
 	limit := len(inst.Messages)

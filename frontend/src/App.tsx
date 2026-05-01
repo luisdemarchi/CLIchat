@@ -1,16 +1,19 @@
-import { MessageSquarePlus, Moon, Paperclip, Search, Send, Sun, TerminalSquare } from 'lucide-react';
+import { MessageSquarePlus, Moon, Paperclip, Search, Send, Square, Sun, TerminalSquare, Trash2, ZoomIn, ZoomOut } from 'lucide-react';
 import React, { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   createChat,
+  deleteSession,
   getBootstrap,
   onStateUpdate,
   pickFiles,
+  reconnectSession,
   respondToPrompt,
   selectSession,
   sendFiles,
   sendMessage,
+  sendTerminalInput,
 } from './lib/api';
 import type { Bootstrap, Message, ProviderId, Session } from './types';
 import { TerminalPane } from './components/TerminalPane';
@@ -131,12 +134,45 @@ export function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>(
     () => (document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'),
   );
+  const FONT_LEVELS = [0.85, 0.95, 1, 1.15, 1.3] as const;
+  const [fontLevel, setFontLevel] = useState<number>(() => {
+    const stored = Number(localStorage.getItem('clichat.fontLevel'));
+    if (Number.isInteger(stored) && stored >= 0 && stored < FONT_LEVELS.length) return stored;
+    return 2;
+  });
   const pickerWrapRef = useRef<HTMLDivElement | null>(null);
+  const [swipe, setSwipe] = useState<{ id: string; dx: number } | null>(null);
+  const swipeStartRef = useRef<{ x: number; width: number } | null>(null);
+  const lastSwipeDxRef = useRef(0);
+  const SWIPE_THRESHOLD = 130;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('clichat.theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty('--wa-bubble-scale', String(FONT_LEVELS[fontLevel]));
+    localStorage.setItem('clichat.fontLevel', String(fontLevel));
+  }, [fontLevel]);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key === '=' || e.key === '+') {
+        e.preventDefault();
+        setFontLevel((l) => Math.min(FONT_LEVELS.length - 1, l + 1));
+      } else if (e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        setFontLevel((l) => Math.max(0, l - 1));
+      } else if (e.key === '0') {
+        e.preventDefault();
+        setFontLevel(2);
+      }
+    }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
 
   useEffect(() => {
     if (!pickerOpen) return;
@@ -188,7 +224,9 @@ export function App() {
   );
   const SelectedIcon = selectedStatus.Icon;
 
-  const canSend = Boolean(selected && selected.status !== 'busy' && selected.terminalAttached);
+  // CLIs aceitam input concorrente — não bloquear durante busy. Só desabilitar
+  // quando o terminal não está realmente conectado (offline / não respawnado).
+  const canSend = Boolean(selected && selected.terminalAttached && selected.status !== 'offline');
 
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const lastMessageCount = (selected?.messages ?? []).length;
@@ -228,6 +266,13 @@ export function App() {
     } catch {
       // optimistic
     }
+    if (!session.terminalAttached || session.status === 'offline') {
+      try {
+        await reconnectSession(session.id);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    }
   }
 
   async function handleNewChat(provider: { id: ProviderId; name: string }) {
@@ -250,7 +295,7 @@ export function App() {
     event.preventDefault();
     if (!selected || draft.trim() === '') return;
     if (!canSend) {
-      setError('Aguarde a resposta atual terminar.');
+      setError('Chat offline — clique no chat na barra lateral para reconectar.');
       return;
     }
     const text = draft.trim();
@@ -273,10 +318,31 @@ export function App() {
     }
   }
 
+  async function handleInterrupt() {
+    if (!selected) return;
+    setError('');
+    try {
+      await sendTerminalInput({ sessionId: selected.id, data: '' });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleDeleteSession(sessionId: string, label: string) {
+    const confirmed = window.confirm(`Encerrar o chat "${label}"? O CLI será fechado.`);
+    if (!confirmed) return;
+    setError('');
+    try {
+      await deleteSession(sessionId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function handleAttach() {
     if (!selected) return;
     if (!canSend) {
-      setError('Aguarde a resposta atual terminar.');
+      setError('Chat offline — clique no chat na barra lateral para reconectar.');
       return;
     }
     setError('');
@@ -343,6 +409,24 @@ export function App() {
             <button
               className="icon-btn"
               type="button"
+              title="Diminuir fonte (Cmd -)"
+              disabled={fontLevel === 0}
+              onClick={() => setFontLevel((l) => Math.max(0, l - 1))}
+            >
+              <ZoomOut size={20} />
+            </button>
+            <button
+              className="icon-btn"
+              type="button"
+              title="Aumentar fonte (Cmd +)"
+              disabled={fontLevel === FONT_LEVELS.length - 1}
+              onClick={() => setFontLevel((l) => Math.min(FONT_LEVELS.length - 1, l + 1))}
+            >
+              <ZoomIn size={20} />
+            </button>
+            <button
+              className="icon-btn"
+              type="button"
               title={theme === 'dark' ? 'Tema claro' : 'Tema escuro'}
               onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
             >
@@ -376,14 +460,57 @@ export function App() {
           ) : null}
           {filteredSessions.map((session) => {
             const info = describeStatus(session);
+            const isSwiping = swipe?.id === session.id;
+            const dx = isSwiping ? swipe!.dx : 0;
             const RowIcon = info.Icon;
             const unread = unreadCount(session);
             return (
+              <div className="chat-row-wrap" key={session.id}>
+                <div className="chat-row-bg" aria-hidden="true">
+                  <Trash2 size={22} />
+                  <span>encerrar</span>
+                </div>
               <button
-                className={`chat-row ${session.id === selected?.id ? 'active' : ''} ${unread > 0 ? 'unread' : ''}`}
-                key={session.id}
+                className={`chat-row ${session.id === selected?.id ? 'active' : ''} ${unread > 0 ? 'unread' : ''} ${isSwiping ? 'swiping' : ''}`}
                 type="button"
-                onClick={() => void handleSelect(session)}
+                style={{ transform: dx ? `translateX(${dx}px)` : undefined }}
+                onPointerDown={(e) => {
+                  if (e.button !== 0 && e.pointerType === 'mouse') return;
+                  const el = e.currentTarget;
+                  el.setPointerCapture(e.pointerId);
+                  swipeStartRef.current = { x: e.clientX, width: el.getBoundingClientRect().width };
+                  setSwipe({ id: session.id, dx: 0 });
+                }}
+                onPointerMove={(e) => {
+                  if (!swipeStartRef.current || swipe?.id !== session.id) return;
+                  const delta = Math.min(0, e.clientX - swipeStartRef.current.x);
+                  setSwipe({ id: session.id, dx: Math.max(delta, -swipeStartRef.current.width) });
+                }}
+                onPointerUp={(e) => {
+                  const el = e.currentTarget;
+                  if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+                  const dxNow = swipe?.id === session.id ? swipe.dx : 0;
+                  lastSwipeDxRef.current = dxNow;
+                  swipeStartRef.current = null;
+                  setSwipe(null);
+                  if (dxNow <= -SWIPE_THRESHOLD) {
+                    void handleDeleteSession(session.id, session.topic || session.title);
+                  }
+                }}
+                onPointerCancel={(e) => {
+                  const el = e.currentTarget;
+                  if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+                  swipeStartRef.current = null;
+                  setSwipe(null);
+                }}
+                onClick={(e) => {
+                  if (lastSwipeDxRef.current < -5) {
+                    e.preventDefault();
+                    lastSwipeDxRef.current = 0;
+                    return;
+                  }
+                  void handleSelect(session);
+                }}
               >
                 <span
                   className={`row-avatar status-${info.className ?? ''} ${info.spin ? 'spin' : ''}`}
@@ -406,7 +533,13 @@ export function App() {
                     <span className="row-time">{formatTime(session.updatedAt)}</span>
                   </span>
                   <span className="row-line-2">
-                    <span className="row-snippet">{session.lastMessage || session.title || '—'}</span>
+                    <span className="row-snippet">
+                      {(() => {
+                        const name = session.topic || session.title;
+                        const snippet = session.lastMessage || session.title || '—';
+                        return snippet === name ? info.label : snippet;
+                      })()}
+                    </span>
                     {unread > 0 ? (
                       <span className="unread-badge" title={`${unread} mensagem${unread === 1 ? '' : 'ns'} não lida${unread === 1 ? '' : 's'}`}>
                         {unread > 99 ? '99+' : unread}
@@ -415,6 +548,7 @@ export function App() {
                   </span>
                 </span>
               </button>
+              </div>
             );
           })}
         </nav>
@@ -484,15 +618,28 @@ export function App() {
               </article>
             ) : null}
             {selected.status !== 'idle' && selected.status !== 'offline' ? (
-              <button
-                type="button"
-                className={`status-pill clickable ${selectedStatus.spin ? 'spin-icon' : ''} status-${selectedStatus.className ?? ''}`}
-                title={terminalOpen ? 'Esconder terminal' : 'Mostrar terminal pra ver detalhes'}
-                onClick={() => setTerminalOpen(true)}
-              >
-                <SelectedIcon size={14} />
-                <span>{selectedStatus.label}…</span>
-              </button>
+              <div className="status-pill-wrap">
+                <button
+                  type="button"
+                  className={`status-pill clickable ${selectedStatus.spin ? 'spin-icon' : ''} status-${selectedStatus.className ?? ''}`}
+                  title={terminalOpen ? 'Esconder terminal' : 'Mostrar terminal pra ver detalhes'}
+                  onClick={() => setTerminalOpen(true)}
+                >
+                  <SelectedIcon size={14} />
+                  <span>{selectedStatus.label}…</span>
+                </button>
+                {selectedStatus.busy ? (
+                  <button
+                    type="button"
+                    className="status-stop"
+                    title="Interromper (ESC)"
+                    aria-label="Interromper"
+                    onClick={() => void handleInterrupt()}
+                  >
+                    <Square size={12} fill="currentColor" />
+                  </button>
+                ) : null}
+              </div>
             ) : null}
           </div>
 
@@ -512,7 +659,7 @@ export function App() {
             );
           })}
 
-          <form className="composer" onSubmit={handleSubmit}>
+          <form className={`composer ${canSend ? '' : 'disabled'}`} onSubmit={handleSubmit}>
             <button
               type="button"
               className="send-btn"
@@ -525,7 +672,7 @@ export function App() {
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder="Mensagem"
+              placeholder={canSend ? 'Mensagem' : 'Chat offline — clique no chat para reconectar'}
               disabled={!canSend}
             />
             <button type="submit" className="send-btn" title="Enviar" disabled={!canSend}>

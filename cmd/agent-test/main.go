@@ -1,4 +1,4 @@
-// agent-test: end-to-end smoke test against a running agent-host.
+// agent-test: end-to-end smoke test against a running clichat-host.
 // Spawns each provider, sends a tiny prompt through the PTY, captures output,
 // and reports whether the CLI actually submitted (responded) and whether
 // chat-bubble messages were captured.
@@ -49,7 +49,7 @@ func main() {
 		{Name: "codex", Command: lookup("codex"), Args: []string{"--no-alt-screen"}},
 	}
 	if err := waitHealth(8 * time.Second); err != nil {
-		fmt.Println("agent-host not reachable:", err)
+		fmt.Println("clichat-host not reachable:", err)
 		os.Exit(2)
 	}
 	fmt.Println("== agent-test e2e ==")
@@ -320,7 +320,7 @@ func waitHealth(d time.Duration) error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return errors.New("agent-host did not respond in time")
+	return errors.New("clichat-host did not respond in time")
 }
 
 func postInstance(provider string) (string, error) {

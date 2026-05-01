@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -192,16 +193,55 @@ func (a *App) reconnectInstance(inst agent.Instance) {
 		"AGENT_CHAT_INTERNAL_SESSION_ID=" + inst.ID,
 		"AGENT_CHAT_HOST=" + a.host.BaseURL(),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if _, err := a.host.StartTerminal(ctx, inst.ID, hostclient.StartTerminalInput{
 		Command: command,
 		Args:    args,
 		CWD:     inst.CWD,
 		Env:     env,
-	}); err == nil {
-		a.subscribeOutput(inst.ID)
+	}); err != nil {
+		log.Printf("reconnect-failed instance=%s provider=%s args=%v err=%v",
+			shortID(inst.ID), inst.ProviderID, args, err)
+		// Retry fresh when resume hint failed:
+		//   codex resume --last → no rollout available
+		//   claude --resume <id> → session UUID gone
+		var freshArgs []string
+		switch inst.ProviderID {
+		case "codex":
+			if len(args) >= 2 && args[0] == "resume" && args[1] == "--last" {
+				freshArgs = append([]string{}, prov.Args...)
+			}
+		case "claude":
+			if len(args) >= 2 && args[0] == "--resume" {
+				freshArgs = append([]string{}, prov.Args...)
+				freshArgs = append(freshArgs, claudeAgentChatArgs(inst.ID, prov)...)
+			}
+		}
+		if freshArgs != nil {
+			log.Printf("reconnect-retry-fresh instance=%s provider=%s args=%v", shortID(inst.ID), inst.ProviderID, freshArgs)
+			if _, err2 := a.host.StartTerminal(ctx, inst.ID, hostclient.StartTerminalInput{
+				Command: command,
+				Args:    freshArgs,
+				CWD:     inst.CWD,
+				Env:     env,
+			}); err2 != nil {
+				log.Printf("reconnect-retry-failed instance=%s err=%v", shortID(inst.ID), err2)
+				return
+			}
+			a.subscribeOutput(inst.ID)
+		}
+		return
 	}
+	log.Printf("reconnect-ok instance=%s provider=%s", shortID(inst.ID), inst.ProviderID)
+	a.subscribeOutput(inst.ID)
+}
+
+func shortID(id string) string {
+	if len(id) >= 8 {
+		return id[:8]
+	}
+	return id
 }
 
 func (a *App) startStateStream() {
@@ -349,6 +389,49 @@ func (a *App) ListSessions() []Session {
 	return a.sessions()
 }
 
+// ReconnectSession respawns the underlying CLI for a session whose PTY died
+// (daemon was restarted, user closed app, or the CLI exited). Idempotent —
+// returns nil if already attached. Used by the frontend when the user clicks
+// on an offline chat row.
+func (a *App) ReconnectSession(id string) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("session id is required")
+	}
+	a.mu.RLock()
+	inst, ok := a.instances[id]
+	a.mu.RUnlock()
+	if !ok {
+		return errors.New("session not found")
+	}
+	if inst.Origin != agent.OriginInternal {
+		return nil
+	}
+	if inst.TerminalAttached {
+		return nil
+	}
+	go a.reconnectInstance(inst)
+	return nil
+}
+
+func (a *App) DeleteSession(id string) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("session id is required")
+	}
+	a.mu.RLock()
+	_, ok := a.instances[id]
+	a.mu.RUnlock()
+	if !ok {
+		return errors.New("session not found")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := a.host.DeleteInstance(ctx, id); err != nil {
+		return err
+	}
+	a.removeInstance(id)
+	return nil
+}
+
 func (a *App) SelectSession(id string) (Session, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -372,7 +455,7 @@ func (a *App) CreateChat(input CreateInput) (Session, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := a.host.Health(ctx); err != nil {
-		return Session{}, errors.New("agent-host offline. Rode: agent-host serve")
+		return Session{}, errors.New("clichat-host offline. Rode: clichat-host serve")
 	}
 
 	inst, err := a.host.CreateInstance(ctx, hostclient.CreateInstanceInput{
@@ -437,11 +520,8 @@ func (a *App) SendMessage(input SendInput) (Session, error) {
 	if !ok {
 		return Session{}, errors.New("session not found")
 	}
-	if inst.Status == agent.StatusBusy {
-		return a.toSession(inst), errors.New("aguarde a resposta atual terminar")
-	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	updated, err := a.host.AppendMessage(ctx, inst.ID, agent.RoleUser, text)
@@ -508,9 +588,6 @@ func (a *App) SendFiles(input SendFilesInput) (Session, error) {
 	}
 	if inst.Origin != agent.OriginInternal {
 		return a.toSession(inst), errors.New("anexar arquivo so funciona em sessoes internas")
-	}
-	if inst.Status == agent.StatusBusy {
-		return a.toSession(inst), errors.New("aguarde a resposta atual terminar")
 	}
 
 	bubble := "📎 Anexando " + pluralFiles(len(paths)) + ":\n"
@@ -587,6 +664,24 @@ func (a *App) RespondToPrompt(input TerminalActionInput) (Session, error) {
 	return a.toSession(updated), nil
 }
 
+type TerminalResizeInput struct {
+	SessionID string `json:"sessionId"`
+	Cols      uint16 `json:"cols"`
+	Rows      uint16 `json:"rows"`
+}
+
+func (a *App) ResizeTerminal(input TerminalResizeInput) error {
+	if strings.TrimSpace(input.SessionID) == "" {
+		return errors.New("session id is required")
+	}
+	if input.Cols == 0 || input.Rows == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return a.host.ResizeTerminal(ctx, input.SessionID, input.Cols, input.Rows)
+}
+
 func (a *App) SendTerminalInput(input TerminalRawInput) error {
 	if strings.TrimSpace(input.SessionID) == "" {
 		return errors.New("session id is required")
@@ -635,14 +730,14 @@ func (a *App) MirrorStatus() mirror.Status {
 			Enabled: false,
 			Mode:    "host-offline",
 			Address: hostclient.DefaultHTTPAddress,
-			Note:    "agent-host offline. Rode: agent-host serve",
+			Note:    "clichat-host offline. Rode: clichat-host serve",
 		}
 	}
 	return mirror.Status{
 		Enabled: true,
-		Mode:    "agent-host",
+		Mode:    "clichat-host",
 		Address: hostclient.DefaultHTTPAddress,
-		Note:    "agent-host online.",
+		Note:    "clichat-host online.",
 	}
 }
 
@@ -765,7 +860,7 @@ func (a *App) providerByID(id provider.ID) (provider.Provider, bool) {
 // ---------------------------------------------------------------------------
 
 func claudeAgentChatArgs(sessionID string, _ provider.Provider) []string {
-	// MCP server bridging back to agent-host. We only expose the topic-update
+	// MCP server bridging back to clichat-host. We only expose the topic-update
 	// tool — chat bubbles still come from the JSONL transcript watcher (more
 	// reliable than depending on Claude calling agent_chat_reply on every turn).
 	mcpConfig := `{"mcpServers":{"clichat":{"type":"http","url":"http://127.0.0.1:47657/mcp"}}}`

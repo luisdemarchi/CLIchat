@@ -76,6 +76,16 @@ func (m *Manager) Send(sessionID string, data []byte) error {
 	return process.Write(data)
 }
 
+func (m *Manager) Resize(sessionID string, cols, rows uint16) error {
+	m.mu.RLock()
+	process := m.processes[sessionID]
+	m.mu.RUnlock()
+	if process == nil {
+		return errors.New("terminal process not found")
+	}
+	return process.Resize(cols, rows)
+}
+
 func (m *Manager) Subscribe(sessionID string) (<-chan []byte, func(), error) {
 	m.mu.RLock()
 	process := m.processes[sessionID]

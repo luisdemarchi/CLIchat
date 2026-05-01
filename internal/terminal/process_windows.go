@@ -69,6 +69,11 @@ func (p *Process) Write(data []byte) error {
 	return err
 }
 
+func (p *Process) Resize(cols, rows uint16) error {
+	// Windows ConPTY resize not implemented; treat as no-op.
+	return nil
+}
+
 func (p *Process) PID() int {
 	if p.cmd != nil && p.cmd.Process != nil {
 		return p.cmd.Process.Pid

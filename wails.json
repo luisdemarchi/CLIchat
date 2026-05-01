@@ -9,7 +9,7 @@
   "info": {
     "companyName": "Luís De Marchi",
     "productName": "CLIchat",
-    "productVersion": "0.2.0",
+    "productVersion": "0.3.0",
     "copyright": "Copyright © 2026 Luís De Marchi (@luisdemarchi)",
     "comments": "WhatsApp-style desktop chat for Claude Code and Codex CLIs. Projeto open source feito no Brasil."
   },

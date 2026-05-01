@@ -43,7 +43,7 @@ type hostEvent struct {
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: agent-host serve [--http addr] [--attach addr] [--state path]")
+		fmt.Fprintln(os.Stderr, "usage: clichat-host serve [--http addr] [--attach addr] [--state path]")
 	}
 
 	if len(os.Args) < 2 || os.Args[1] != "serve" {
@@ -90,7 +90,7 @@ func main() {
 	mux.HandleFunc("/v1/instances", s.instancesCollection)
 	mux.HandleFunc("/v1/instances/", s.instance)
 
-	log.Printf("agent-host listening http=%s attach=%s state=%s", *httpAddr, *attachAddr, *statePath)
+	log.Printf("clichat-host listening http=%s attach=%s state=%s", *httpAddr, *attachAddr, *statePath)
 	if err := http.ListenAndServe(*httpAddr, mux); err != nil {
 		log.Fatal(err)
 	}
@@ -132,13 +132,18 @@ func (s *server) stateEvents(w http.ResponseWriter, r *http.Request) {
 
 	out := make(chan []agent.Event, 32)
 	_, unsubscribe := s.store.Subscribe(func(events []agent.Event) {
+		// Recover from send-on-closed-channel: the store may invoke this
+		// listener concurrently with handler exit. defers run in reverse
+		// (unsubscribe then close), but a listener already in-flight can
+		// still race the close.
+		defer func() { _ = recover() }()
 		select {
 		case out <- events:
 		default:
 		}
 	})
-	defer unsubscribe()
 	defer close(out)
+	defer unsubscribe()
 
 	writeSSE(w, "snapshot", map[string]any{"instances": s.store.Snapshot()})
 	flusher.Flush()
@@ -232,6 +237,8 @@ func (s *server) instance(w http.ResponseWriter, r *http.Request) {
 		s.instancePending(w, r, id)
 	case "send":
 		s.instanceSend(w, r, id)
+	case "resize":
+		s.instanceResize(w, r, id)
 	case "events":
 		s.instanceEvents(w, r, id)
 	case "start-terminal":
@@ -391,6 +398,28 @@ func (s *server) instanceSend(w http.ResponseWriter, r *http.Request, id string)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 }
 
+type resizeRequest struct {
+	Cols uint16 `json:"cols"`
+	Rows uint16 `json:"rows"`
+}
+
+func (s *server) instanceResize(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var input resizeRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := s.manager.Resize(id, input.Cols, input.Rows); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 type startTerminalRequest struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args"`
@@ -430,9 +459,16 @@ func (s *server) instanceStartTerminal(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	effectiveCWD := firstNonEmpty(input.CWD, inst.CWD)
-	if effectiveCWD == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			effectiveCWD = home
+	// Always rewrite empty / home-root CWDs to a dedicated sandbox dir to
+	// avoid the spawned CLI (Claude/Codex/Gemini) scanning the home tree
+	// and triggering macOS TCC prompts for FileProvider domains (Google
+	// Drive, iCloud, etc.) and MediaLibrary (Apple Music). Older instances
+	// were created with CWD=$HOME — auto-migrate them to the sandbox here.
+	if home, err := os.UserHomeDir(); err == nil {
+		sandbox := filepath.Join(home, ".clichat", "sandbox")
+		_ = os.MkdirAll(sandbox, 0o755)
+		if effectiveCWD == "" || effectiveCWD == home {
+			effectiveCWD = sandbox
 		}
 	}
 	process, err := s.manager.Start(terminal.StartOptions{

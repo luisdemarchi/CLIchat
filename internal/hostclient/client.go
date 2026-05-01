@@ -149,6 +149,22 @@ func (c *Client) ClearPending(ctx context.Context, instanceID string) (agent.Ins
 	return out, json.NewDecoder(res.Body).Decode(&out)
 }
 
+func (c *Client) DeleteInstance(ctx context.Context, instanceID string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/instances/"+instanceID, nil)
+	if err != nil {
+		return err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return decodeError(res)
+	}
+	return nil
+}
+
 type SendInput struct {
 	Text string `json:"text"`
 	Data string `json:"data,omitempty"`
@@ -156,6 +172,11 @@ type SendInput struct {
 
 func (c *Client) SendText(ctx context.Context, instanceID string, text string) error {
 	return c.postNoResult(ctx, c.baseURL+"/v1/instances/"+instanceID+"/send", SendInput{Text: text})
+}
+
+func (c *Client) ResizeTerminal(ctx context.Context, instanceID string, cols, rows uint16) error {
+	return c.postNoResult(ctx, c.baseURL+"/v1/instances/"+instanceID+"/resize",
+		map[string]uint16{"cols": cols, "rows": rows})
 }
 
 func (c *Client) SendData(ctx context.Context, instanceID string, data []byte) error {

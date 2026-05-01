@@ -7,12 +7,15 @@ declare global {
         App?: {
           GetBootstrap: () => Promise<Bootstrap>;
           SelectSession: (id: string) => Promise<Session>;
+          DeleteSession: (id: string) => Promise<void>;
+          ReconnectSession: (id: string) => Promise<void>;
           CreateChat: (input: { providerId: ProviderId; title: string; cwd: string }) => Promise<Session>;
           SendMessage: (input: { sessionId: string; text: string }) => Promise<Session>;
           SendFiles: (input: { sessionId: string; paths: string[] }) => Promise<Session>;
           PickFiles: () => Promise<string[]>;
           RespondToPrompt: (input: { sessionId: string; actionId: string; input: string }) => Promise<Session>;
           SendTerminalInput: (input: { sessionId: string; data: string }) => Promise<void>;
+          ResizeTerminal: (input: { sessionId: string; cols: number; rows: number }) => Promise<void>;
           OpenTerminal: (input: { sessionId: string }) => Promise<string>;
           ExternalAttachCommand: (sessionId: string) => Promise<string>;
           FocusTerminal: (sessionId: string) => Promise<void>;
@@ -87,6 +90,22 @@ export async function selectSession(id: string): Promise<Session> {
   return fallback.sessions.find((session) => session.id === id) ?? fallback.sessions[0];
 }
 
+export async function deleteSession(id: string): Promise<void> {
+  const api = bridge();
+  if (api?.DeleteSession) {
+    return api.DeleteSession(id);
+  }
+  throw new Error('Backend Wails indisponivel. Abra pelo app desktop para encerrar chats.');
+}
+
+export async function reconnectSession(id: string): Promise<void> {
+  const api = bridge();
+  if (api?.ReconnectSession) {
+    return api.ReconnectSession(id);
+  }
+  throw new Error('Backend Wails indisponivel.');
+}
+
 export async function createChat(input: { providerId: ProviderId; title: string; cwd: string }): Promise<Session> {
   const api = bridge();
   if (api?.CreateChat) {
@@ -133,6 +152,14 @@ export async function sendTerminalInput(input: { sessionId: string; data: string
     return api.SendTerminalInput(input);
   }
   throw new Error('Backend Wails indisponivel. Abra pelo app desktop para controlar o terminal.');
+}
+
+export async function resizeTerminal(input: { sessionId: string; cols: number; rows: number }): Promise<void> {
+  const api = bridge();
+  if (api?.ResizeTerminal) {
+    return api.ResizeTerminal(input);
+  }
+  // best-effort: silent no-op if bridge missing
 }
 
 export async function openTerminal(input: { sessionId: string }): Promise<string> {
