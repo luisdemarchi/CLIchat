@@ -641,6 +641,10 @@ func runInstall(repair bool) error {
 	if err != nil {
 		return err
 	}
+	buildRoot, err := prepareBuildRoot(repoRoot)
+	if err != nil {
+		return err
+	}
 	binDir := getenvDefault("CLICHAT_BIN_DIR", filepath.Join(mustHome(), ".local", "bin"))
 	stateDir := filepath.Join(mustHome(), ".clichat")
 	logDir := filepath.Join(stateDir, "logs")
@@ -663,10 +667,10 @@ func runInstall(repair bool) error {
 	cliBin := filepath.Join(binDir, "clichat")
 	_ = os.Remove(hostBin)
 	_ = os.Remove(cliBin)
-	if err := runCmd(repoRoot, "go", "build", "-o", hostBin, "./cmd/clichat-host"); err != nil {
+	if err := runCmd(buildRoot, "go", "build", "-o", hostBin, "./cmd/clichat-host"); err != nil {
 		return err
 	}
-	if err := runCmd(repoRoot, "go", "build", "-o", cliBin, "./cmd/clichat"); err != nil {
+	if err := runCmd(buildRoot, "go", "build", "-o", cliBin, "./cmd/clichat"); err != nil {
 		return err
 	}
 	_ = os.Remove(filepath.Join(binDir, "agentctl"))
@@ -681,10 +685,10 @@ func runInstall(repair bool) error {
 		if err := ensureWails(); err != nil {
 			return err
 		}
-		if err := buildWails(repoRoot); err != nil {
+		if err := buildWails(buildRoot); err != nil {
 			return err
 		}
-		if err := placeApp(repoRoot); err != nil {
+		if err := placeApp(buildRoot); err != nil {
 			warn("%v", err)
 		}
 	}
@@ -790,6 +794,57 @@ func findRepoRoot() (string, error) {
 		return root, nil
 	}
 	return "", fmt.Errorf("could not locate CLIchat source: %w", err)
+}
+
+func prepareBuildRoot(source string) (string, error) {
+	if isWritableDir(source) {
+		return source, nil
+	}
+	dest := filepath.Join(mustHome(), ".clichat", "source")
+	info("copying read-only module source to %s", dest)
+	if err := os.RemoveAll(dest); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return "", err
+	}
+	if err := copyDir(source, dest); err != nil {
+		return "", err
+	}
+	if err := makeTreeWritable(dest); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
+func isWritableDir(dir string) bool {
+	file, err := os.CreateTemp(dir, ".clichat-write-test-*")
+	if err != nil {
+		return false
+	}
+	name := file.Name()
+	_ = file.Close()
+	_ = os.Remove(name)
+	return true
+}
+
+func makeTreeWritable(root string) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+		if entry.IsDir() {
+			mode |= 0o700
+		} else {
+			mode |= 0o600
+		}
+		return os.Chmod(path, mode)
+	})
 }
 
 func findRepoRootFromWD() (string, bool) {
