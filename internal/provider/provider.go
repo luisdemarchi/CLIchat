@@ -40,7 +40,7 @@ func Defaults() []Provider {
 			ID:          Codex,
 			Name:        "Codex",
 			CLI:         "codex",
-			Args:        []string{"--no-alt-screen"},
+			Args:        []string{"--no-alt-screen", "--dangerously-bypass-hook-trust"},
 			Tag:         "CODEX",
 			Accent:      "#a45f18",
 			Description: "Codex CLI in an app-managed local session.",

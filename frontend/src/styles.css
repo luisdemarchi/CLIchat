@@ -1198,9 +1198,10 @@ select {
 
 .terminal-panel {
   display: grid;
-  grid-template-rows: 36px minmax(0, 1fr);
+  grid-template-rows: 6px 36px minmax(0, 1fr);
   height: min(40vh, 380px);
   min-height: 220px;
+  max-height: calc(100vh - 170px);
   border-top: 1px solid #1f242b;
   background: #0e1116;
   color: #d6deeb;
@@ -1215,6 +1216,42 @@ select {
 
 .terminal-panel.hidden {
   display: none;
+}
+
+.terminal-resizer {
+  cursor: ns-resize;
+  background: #151922;
+  border-bottom: 1px solid #1f242b;
+  touch-action: none;
+}
+
+.terminal-resizer::before {
+  content: '';
+  display: block;
+  width: 48px;
+  height: 2px;
+  margin: 2px auto 0;
+  border-radius: 999px;
+  background: #3a4656;
+}
+
+.terminal-resizer:hover::before,
+.resizing-terminal .terminal-resizer::before {
+  background: #4ec9b0;
+}
+
+[data-theme='light'] .terminal-resizer {
+  background: #f0f2f5;
+  border-bottom-color: #d1d7db;
+}
+
+[data-theme='light'] .terminal-resizer::before {
+  background: #9aa5ad;
+}
+
+body.resizing-terminal {
+  cursor: ns-resize;
+  user-select: none;
 }
 
 .terminal-panel header {

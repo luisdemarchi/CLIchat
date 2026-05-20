@@ -154,6 +154,10 @@ func (w *TranscriptWatcher) discover() {
 			return nil
 		}
 		cwd := projectDirFromHash(filepath.Base(filepath.Dir(path)))
+		if _, ok := w.store.ClaimTranscriptForInternal("claude", path, claudeID, cwd, info.ModTime().Add(-2*time.Minute)); ok {
+			w.trackFromStart(path)
+			return nil
+		}
 		w.store.RegisterExternal(RegisterExternalInput{
 			ProviderID:        "claude",
 			CWD:               cwd,
@@ -624,5 +628,18 @@ func projectDirFromHash(hash string) string {
 		return ""
 	}
 	hash = strings.TrimLeft(hash, "-")
-	return "/" + strings.ReplaceAll(hash, "-", "/")
+	parts := strings.Split(hash, "-")
+	pathParts := make([]string, 0, len(parts))
+	for i := 0; i < len(parts); i++ {
+		part := parts[i]
+		if part == "" && i+1 < len(parts) && parts[i+1] != "" {
+			pathParts = append(pathParts, "."+parts[i+1])
+			i++
+			continue
+		}
+		if part != "" {
+			pathParts = append(pathParts, part)
+		}
+	}
+	return "/" + strings.Join(pathParts, "/")
 }

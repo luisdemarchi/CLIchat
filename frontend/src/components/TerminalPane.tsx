@@ -101,6 +101,8 @@ export function TerminalPane({ sessionID, visible = true }: Props) {
     let themeObserver: MutationObserver | undefined;
     let dataDisposable: { dispose: () => void } | undefined;
     let scrollDisposable: { dispose: () => void } | undefined;
+    let resizeFrame = 0;
+    let writeFrame = 0;
 
     void Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')]).then(([xterm, fitAddon]) => {
       if (disposed || !containerRef.current) return;
@@ -113,8 +115,8 @@ export function TerminalPane({ sessionID, visible = true }: Props) {
         fontFamily: 'Menlo, Monaco, "SFMono-Regular", Consolas, "Liberation Mono", monospace',
         fontSize: 13,
         lineHeight: 1.2,
-        scrollback: 20000,
-        smoothScrollDuration: 80,
+        scrollback: 5000,
+        smoothScrollDuration: 0,
         allowProposedApi: true,
         allowTransparency: false,
         macOptionIsMeta: true,
@@ -144,6 +146,30 @@ export function TerminalPane({ sessionID, visible = true }: Props) {
       fitNow();
       terminalRef.current = terminal;
       fitRef.current = fit;
+      const writeQueue: Uint8Array[] = [];
+
+      const scheduleFit = () => {
+        if (resizeFrame) return;
+        resizeFrame = window.requestAnimationFrame(() => {
+          resizeFrame = 0;
+          fitNow();
+        });
+      };
+
+      const flushOutput = () => {
+        writeFrame = 0;
+        if (writeQueue.length === 0) return;
+        const total = writeQueue.reduce((sum, chunk) => sum + chunk.length, 0);
+        const merged = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of writeQueue.splice(0)) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        }
+        terminal.write(merged, () => {
+          if (stickRef.current) terminal.scrollToBottom();
+        });
+      };
 
       dataDisposable = terminal.onData((data) => {
         void sendTerminalInput({ sessionId: sessionID, data });
@@ -163,22 +189,19 @@ export function TerminalPane({ sessionID, visible = true }: Props) {
         if (typeof payload !== 'string') return;
         try {
           const bytes = decodeBase64ToBytes(payload);
-          terminal.write(bytes, () => {
-            if (stickRef.current) terminal.scrollToBottom();
-          });
+          writeQueue.push(bytes);
+          if (!writeFrame) writeFrame = window.requestAnimationFrame(flushOutput);
         } catch {
           // skip malformed chunk
         }
       };
       const onExit = () => {
-        terminal.writeln('\r\n\x1b[33m[processo encerrado]\x1b[0m');
+        terminal.writeln('\r\n\x1b[33m[process exited]\x1b[0m');
       };
       unsubOutput = window.runtime?.EventsOn(`terminal:${sessionID}`, onOutput);
       unsubExit = window.runtime?.EventsOn(`terminal:${sessionID}:exit`, onExit);
 
-      resizeObserver = new ResizeObserver(() => {
-        fitNow();
-      });
+      resizeObserver = new ResizeObserver(scheduleFit);
       resizeObserver.observe(containerRef.current);
 
       themeObserver = new MutationObserver(() => {
@@ -189,6 +212,8 @@ export function TerminalPane({ sessionID, visible = true }: Props) {
 
     return () => {
       disposed = true;
+      if (resizeFrame) window.cancelAnimationFrame(resizeFrame);
+      if (writeFrame) window.cancelAnimationFrame(writeFrame);
       dataDisposable?.dispose();
       scrollDisposable?.dispose();
       unsubOutput?.();

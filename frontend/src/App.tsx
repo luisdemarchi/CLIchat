@@ -143,6 +143,10 @@ export function App() {
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
   const [terminalOpen, setTerminalOpen] = useState(true);
+  const [terminalHeight, setTerminalHeight] = useState(() => {
+    const stored = Number(localStorage.getItem('clichat.terminalHeight'));
+    return Number.isFinite(stored) && stored >= 180 ? stored : 340;
+  });
   const [pickerOpen, setPickerOpen] = useState(false);
   const [transferOpen, setTransferOpen] = useState(false);
   const [lastSeen, setLastSeen] = useState<Record<string, number>>(() => readLastSeen());
@@ -170,6 +174,10 @@ export function App() {
     document.documentElement.style.setProperty('--wa-bubble-scale', String(FONT_LEVELS[fontLevel]));
     localStorage.setItem('clichat.fontLevel', String(fontLevel));
   }, [fontLevel]);
+
+  useEffect(() => {
+    localStorage.setItem('clichat.terminalHeight', String(Math.round(terminalHeight)));
+  }, [terminalHeight]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -310,6 +318,25 @@ export function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  function handleTerminalResizeStart(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = terminalHeight;
+    const onMove = (move: PointerEvent) => {
+      const maxHeight = Math.max(220, window.innerHeight - 180);
+      const next = startHeight + (startY - move.clientY);
+      setTerminalHeight(Math.min(maxHeight, Math.max(180, next)));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.classList.remove('resizing-terminal');
+    };
+    document.body.classList.add('resizing-terminal');
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -688,7 +715,7 @@ export function App() {
                 </div>
               </article>
             ) : null}
-            {(selected.pendingActions ?? []).length > 0 ? (
+            {canSend && (selected.pendingActions ?? []).length > 0 ? (
               <article className="prompt-card">
                 <p className="prompt-question">
                   {selected.pendingQuestion || 'The terminal is waiting for a choice.'}
@@ -735,21 +762,24 @@ export function App() {
             ) : null}
           </div>
 
-          {state.sessions.map((s) => {
-            const isThisSelected = s.id === selected.id;
-            const visible = isThisSelected && terminalOpen;
-            return (
-              <section key={s.id} className={`terminal-panel ${visible ? '' : 'hidden'}`}>
-                <header>
-                  <strong>Terminal · {s.providerTag}</strong>
-                  <button type="button" onClick={() => setTerminalOpen(false)}>
-                    Hide
-                  </button>
-                </header>
-                <TerminalPane sessionID={s.id} visible={visible} />
-              </section>
-            );
-          })}
+          {selected && selected.terminalAttached && terminalOpen ? (
+            <section className="terminal-panel" style={{ height: terminalHeight }}>
+              <div
+                className="terminal-resizer"
+                role="separator"
+                aria-orientation="horizontal"
+                title="Resize terminal"
+                onPointerDown={handleTerminalResizeStart}
+              />
+              <header>
+                <strong>Terminal · {selected.providerTag}</strong>
+                <button type="button" onClick={() => setTerminalOpen(false)}>
+                  Hide
+                </button>
+              </header>
+              <TerminalPane sessionID={selected.id} visible />
+            </section>
+          ) : null}
 
           <form className={`composer ${canSend ? '' : 'disabled'}`} onSubmit={handleSubmit}>
             <button

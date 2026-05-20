@@ -368,12 +368,16 @@ func (a *App) CreateChat(input CreateInput) (Session, error) {
 		return Session{}, err
 	}
 
+	startCWD := sessionCWD(inst.ID, input.CWD)
 	args := append([]string{}, prov.Args...)
 	if prov.ID == provider.Claude {
 		args = append(args, claudeAgentChatArgs(inst.ID, prov)...)
 	}
 	if prov.ID == provider.Gemini {
 		args = geminiArgs(inst, args, false)
+	}
+	if prov.ID == provider.Codex {
+		_ = ensureCodexTrusted(startCWD)
 	}
 	env := []string{
 		"AGENT_CHAT_INTERNAL_SESSION_ID=" + inst.ID,
@@ -382,7 +386,7 @@ func (a *App) CreateChat(input CreateInput) (Session, error) {
 	updated, err := a.host.StartTerminal(ctx, inst.ID, hostclient.StartTerminalInput{
 		Command: prov.Command,
 		Args:    args,
-		CWD:     input.CWD,
+		CWD:     startCWD,
 		Env:     env,
 	})
 	if err != nil {
@@ -444,7 +448,11 @@ func (a *App) OpenSessionTerminal(input OpenSessionTerminalInput) (Session, erro
 	}
 	memory, _ := a.host.ConversationMemory(ctx, inst.ID)
 
+	startCWD := sessionCWD(inst.ID, inst.CWD)
 	args := freshProviderArgs(inst, prov)
+	if prov.ID == provider.Codex {
+		_ = ensureCodexTrusted(startCWD)
+	}
 	env := []string{
 		"AGENT_CHAT_INTERNAL_SESSION_ID=" + inst.ID,
 		"AGENT_CHAT_HOST=" + a.host.BaseURL(),
@@ -452,7 +460,7 @@ func (a *App) OpenSessionTerminal(input OpenSessionTerminalInput) (Session, erro
 	started, err := a.host.StartTerminal(ctx, inst.ID, hostclient.StartTerminalInput{
 		Command: prov.Command,
 		Args:    args,
-		CWD:     inst.CWD,
+		CWD:     startCWD,
 		Env:     env,
 	})
 	if err != nil {
@@ -878,6 +886,58 @@ func freshProviderArgs(inst agent.Instance, prov provider.Provider) []string {
 		args = geminiArgs(inst, args, false)
 	}
 	return args
+}
+
+func sessionCWD(sessionID string, cwd string) string {
+	cwd = strings.TrimSpace(cwd)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return cwd
+	}
+	if cwd == "" || cwd == home {
+		return filepath.Join(home, ".clichat", "sandbox", sessionID)
+	}
+	return cwd
+}
+
+func ensureCodexTrusted(cwd string) error {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(home, ".codex", "config.toml")
+	section := `[projects.` + tomlString(cwd) + `]`
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if strings.Contains(string(data), section) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	var b strings.Builder
+	if len(data) > 0 {
+		b.WriteString(bytesTrimRightNewlines(data))
+		b.WriteString("\n\n")
+	}
+	b.WriteString(section)
+	b.WriteString("\ntrust_level = \"trusted\"\n")
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func tomlString(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func bytesTrimRightNewlines(data []byte) string {
+	return strings.TrimRight(string(data), "\r\n")
 }
 
 func conversationHandoffPrompt(inst agent.Instance, prov provider.Provider, memory hostclient.ConversationMemory) string {

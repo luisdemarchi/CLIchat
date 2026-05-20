@@ -133,13 +133,16 @@ func (s *Store) markBootOffline() {
 		if inst.Origin != OriginInternal {
 			continue
 		}
+		hasPending := strings.TrimSpace(inst.PendingQuestion) != "" || len(inst.PendingActions) > 0
 		// Force offline + detach for ALL internal instances at boot. Without
 		// this guard, instances that had stale TerminalAttached=true are
 		// skipped by tryAutoReconnect and the user is left with a frozen
 		// chat (no PTY, no respawn).
-		if inst.Status != StatusOffline || inst.TerminalAttached {
+		if inst.Status != StatusOffline || inst.TerminalAttached || hasPending {
 			inst.Status = StatusOffline
 			inst.TerminalAttached = false
+			inst.PendingQuestion = ""
+			inst.PendingActions = []PendingAction{}
 			inst.UpdatedAt = timestamp()
 			changed = true
 		}
@@ -409,6 +412,9 @@ func (s *Store) ClaimTranscriptForInternal(providerID string, path string, provi
 	inst.TranscriptOffset = 0
 	if strings.TrimSpace(providerSessionID) != "" {
 		inst.ProviderSessionID = strings.TrimSpace(providerSessionID)
+		if providerID == "claude" {
+			inst.ClaudeSessionID = strings.TrimSpace(providerSessionID)
+		}
 	}
 	inst.UpdatedAt = timestamp()
 	events := []Event{{Kind: EventInstanceUpdated, ID: inst.ID, Payload: *cloneInstance(inst)}}
@@ -775,6 +781,8 @@ func (s *Store) SetTerminalAttached(id string, attached bool, pid int) (Instance
 		inst.Status = StatusOffline
 		inst.PID = 0
 		inst.TTY = ""
+		inst.PendingQuestion = ""
+		inst.PendingActions = []PendingAction{}
 	}
 	inst.UpdatedAt = timestamp()
 	_ = s.persistLocked()
@@ -798,6 +806,8 @@ func (s *Store) MarkTerminalExited(id string, pid int) (Instance, bool) {
 	inst.PID = 0
 	inst.TTY = ""
 	inst.CurrentTool = ""
+	inst.PendingQuestion = ""
+	inst.PendingActions = []PendingAction{}
 	inst.UpdatedAt = timestamp()
 	_ = s.persistLocked()
 	clone := *cloneInstance(inst)

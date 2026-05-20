@@ -564,7 +564,7 @@ func mergeManagedMatchers(existing any, managed map[string]any) []any {
 	merged := make([]any, 0, len(list)+1)
 	for _, item := range list {
 		if matcher, ok := item.(map[string]any); ok {
-			if isManagedHook(matcher["_managedBy"]) {
+			if isManagedHook(matcher["_managedBy"]) || hasLegacyAgentctlHook(matcher) {
 				continue
 			}
 			merged = append(merged, matcher)
@@ -583,8 +583,10 @@ func stripManagedMatchers(existing any) []any {
 	}
 	stripped := make([]any, 0, len(list))
 	for _, item := range list {
-		if matcher, ok := item.(map[string]any); ok && isManagedHook(matcher["_managedBy"]) {
-			continue
+		if matcher, ok := item.(map[string]any); ok {
+			if isManagedHook(matcher["_managedBy"]) || hasLegacyAgentctlHook(matcher) {
+				continue
+			}
 		}
 		stripped = append(stripped, item)
 	}
@@ -593,6 +595,21 @@ func stripManagedMatchers(existing any) []any {
 
 func isManagedHook(value any) bool {
 	return value == hookManagedTag || value == legacyManagedTag
+}
+
+func hasLegacyAgentctlHook(matcher map[string]any) bool {
+	hooks, _ := matcher["hooks"].([]any)
+	for _, item := range hooks {
+		hook, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		command, _ := hook["command"].(string)
+		if strings.Contains(command, "/agentctl hook ") || strings.Contains(command, " agentctl hook ") {
+			return true
+		}
+	}
+	return false
 }
 
 func readJSONObject(path string) map[string]any {
