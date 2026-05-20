@@ -121,8 +121,26 @@ func NewStore(path string) (*Store, error) {
 	if err := store.load(); err != nil {
 		return nil, err
 	}
+	store.mergeLoadedExternalDuplicates()
 	store.markBootOffline()
 	return store, nil
+}
+
+func (s *Store) mergeLoadedExternalDuplicates() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	for _, inst := range s.instances {
+		if inst == nil || inst.Origin != OriginInternal || inst.ProviderID == "" {
+			continue
+		}
+		if removed := s.mergeExternalTranscriptsLocked(inst, inst.ProviderID); len(removed) > 0 {
+			changed = true
+		}
+	}
+	if changed {
+		_ = s.persistLocked()
+	}
 }
 
 func (s *Store) markBootOffline() {
@@ -437,7 +455,22 @@ func cwdMatches(a, b string) bool {
 	if a == b {
 		return true
 	}
+	if idA, idB := sandboxIDFromPath(a), sandboxIDFromPath(b); idA != "" && idA == idB {
+		return true
+	}
 	return isDirectChild(a, b) || isDirectChild(b, a)
+}
+
+func sandboxIDFromPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	base := filepath.Base(filepath.Clean(path))
+	if looksLikeHexID(base, 32) {
+		return strings.ToLower(base)
+	}
+	return ""
 }
 
 func isDirectChild(parent string, child string) bool {

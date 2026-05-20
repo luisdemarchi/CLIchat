@@ -179,6 +179,46 @@ func TestSetProviderMergesCurrentProviderExternalBeforeTransfer(t *testing.T) {
 	}
 }
 
+func TestNewStoreMergesLoadedExternalWithSandboxIDOnlyCWD(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store, err := NewStore(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandboxID := "c733ed4b2bf1e9bff18b41d977f1e244"
+	cwd := filepath.Join(t.TempDir(), ".clichat", "sandbox", sandboxID)
+	internal := store.CreateInternal(CreateInternalInput{ProviderID: "gemini", CWD: cwd})
+	external := store.RegisterExternal(RegisterExternalInput{
+		ProviderID:     "gemini",
+		CWD:            sandboxID,
+		TranscriptPath: filepath.Join(t.TempDir(), "session.jsonl"),
+	})
+	if _, appended, ok := store.AppendMessage(external.ID, AppendInput{Role: RoleAssistant, Text: "Gemini answered.", SourceID: "session.jsonl:1"}); !ok || !appended {
+		t.Fatalf("expected external assistant append")
+	}
+
+	reloaded, err := NewStore(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reloaded.Get(external.ID); ok {
+		t.Fatalf("duplicate external instance was not removed on load")
+	}
+	got, ok := reloaded.Get(internal.ID)
+	if !ok {
+		t.Fatalf("internal instance missing after reload")
+	}
+	var sawAssistant bool
+	for _, msg := range got.Messages {
+		if msg.Role == RoleAssistant && msg.Text == "Gemini answered." {
+			sawAssistant = true
+		}
+	}
+	if !sawAssistant {
+		t.Fatalf("loaded external Gemini message was not merged into internal chat")
+	}
+}
+
 func TestAppendMessageDedupsSourcefulDuplicateText(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
