@@ -189,13 +189,17 @@ func (a *App) startStateStream() {
 					}
 				}
 			})
-			if err == nil {
+			if ctx.Err() != nil {
 				return
+			}
+			delay := 500 * time.Millisecond
+			if err != nil {
+				delay = 2 * time.Second
 			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(2 * time.Second):
+			case <-time.After(delay):
 			}
 		}
 	}()
@@ -528,26 +532,33 @@ func (a *App) SendMessage(input SendInput) (Session, error) {
 	if err != nil {
 		return a.toSession(inst), err
 	}
-	if _, err := a.host.SetStatus(ctx, inst.ID, agent.StatusBusy, ""); err != nil {
+	a.applyInstance(updated)
+	busy, err := a.host.SetStatus(ctx, inst.ID, agent.StatusBusy, "")
+	if err != nil {
 		return a.toSession(updated), err
 	}
+	a.applyInstance(busy)
 
 	if inst.Origin == agent.OriginInternal {
 		if err := a.host.SendText(ctx, inst.ID, text); err != nil {
-			_, _ = a.host.SetStatus(ctx, inst.ID, agent.StatusWaiting, "")
-			return a.toSession(updated), err
+			waiting, _ := a.host.SetStatus(ctx, inst.ID, agent.StatusWaiting, "")
+			if waiting.ID != "" {
+				a.applyInstance(waiting)
+				return a.toSession(waiting), err
+			}
+			return a.toSession(busy), err
 		}
 	} else {
 		if err := sendToExternalTerminal(inst.TTY, text); err != nil {
-			_, _ = a.host.SetStatus(ctx, inst.ID, agent.StatusWaiting, "")
-			return a.toSession(updated), err
+			waiting, _ := a.host.SetStatus(ctx, inst.ID, agent.StatusWaiting, "")
+			if waiting.ID != "" {
+				a.applyInstance(waiting)
+				return a.toSession(waiting), err
+			}
+			return a.toSession(busy), err
 		}
 	}
-
-	a.mu.Lock()
-	a.instances[updated.ID] = updated
-	a.mu.Unlock()
-	return a.toSession(updated), nil
+	return a.toSession(busy), nil
 }
 
 // PickFiles opens a native multi-file picker and returns the selected absolute
@@ -603,25 +614,28 @@ func (a *App) SendFiles(input SendFilesInput) (Session, error) {
 	if err != nil {
 		return a.toSession(inst), err
 	}
-	if _, err := a.host.SetStatus(ctx, inst.ID, agent.StatusBusy, ""); err != nil {
+	a.applyInstance(updated)
+	busy, err := a.host.SetStatus(ctx, inst.ID, agent.StatusBusy, "")
+	if err != nil {
 		return a.toSession(updated), err
 	}
+	a.applyInstance(busy)
 
 	for i, p := range paths {
 		if err := a.host.SendText(ctx, inst.ID, "@"+p); err != nil {
-			_, _ = a.host.SetStatus(ctx, inst.ID, agent.StatusWaiting, "")
-			return a.toSession(updated), err
+			waiting, _ := a.host.SetStatus(ctx, inst.ID, agent.StatusWaiting, "")
+			if waiting.ID != "" {
+				a.applyInstance(waiting)
+				return a.toSession(waiting), err
+			}
+			return a.toSession(busy), err
 		}
 		// give the TUI a moment to settle before pushing the next path
 		if i < len(paths)-1 {
 			time.Sleep(350 * time.Millisecond)
 		}
 	}
-
-	a.mu.Lock()
-	a.instances[updated.ID] = updated
-	a.mu.Unlock()
-	return a.toSession(updated), nil
+	return a.toSession(busy), nil
 }
 
 func pluralFiles(n int) string {
@@ -657,10 +671,14 @@ func (a *App) RespondToPrompt(input TerminalActionInput) (Session, error) {
 		}
 	}
 	updated, _ := a.host.ClearPending(ctx, inst.ID)
-	_, _ = a.host.SetStatus(ctx, inst.ID, agent.StatusIdle, "")
-	a.mu.Lock()
-	a.instances[updated.ID] = updated
-	a.mu.Unlock()
+	if updated.ID != "" {
+		a.applyInstance(updated)
+	}
+	idle, _ := a.host.SetStatus(ctx, inst.ID, agent.StatusIdle, "")
+	if idle.ID != "" {
+		a.applyInstance(idle)
+		return a.toSession(idle), nil
+	}
 	return a.toSession(updated), nil
 }
 

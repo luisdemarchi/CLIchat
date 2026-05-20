@@ -259,7 +259,7 @@ func (c *Client) SubscribeOutput(ctx context.Context, instanceID string, onEvent
 		return decodeError(res)
 	}
 	scanner := bufio.NewScanner(res.Body)
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	scanner.Buffer(make([]byte, 4096), 32*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -306,7 +306,7 @@ func (c *Client) SubscribeState(ctx context.Context, onEvent func(StateEvent)) e
 		return decodeError(res)
 	}
 	scanner := bufio.NewScanner(res.Body)
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	scanner.Buffer(make([]byte, 4096), 32*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {

@@ -55,7 +55,11 @@ var systemTagSet = map[string]struct{}{
 }
 
 func isSystemTranscriptEntry(text string) bool {
-	m := systemContentTag.FindStringSubmatch(text)
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "# AGENTS.md instructions") || strings.HasPrefix(trimmed, "<INSTRUCTIONS>") {
+		return true
+	}
+	m := systemContentTag.FindStringSubmatch(trimmed)
 	if m == nil {
 		return false
 	}

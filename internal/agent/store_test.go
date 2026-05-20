@@ -110,3 +110,33 @@ func TestAppendMessageDedupsSourcefulDuplicateText(t *testing.T) {
 		t.Fatalf("expected duplicate sourceful text to be ignored")
 	}
 }
+
+func TestAppendMessageDuplicateAssistantClearsBusyStatus(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := store.CreateInternal(CreateInternalInput{ProviderID: "codex", CWD: t.TempDir()})
+	if _, appended, ok := store.AppendMessage(inst.ID, AppendInput{Role: RoleAssistant, Text: "Done", SourceID: "assistant:1"}); !ok || !appended {
+		t.Fatalf("expected first assistant append")
+	}
+	if _, ok := store.SetStatus(inst.ID, StatusInput{Status: StatusBusy, Tool: "shell"}); !ok {
+		t.Fatalf("expected busy status")
+	}
+	got, appended, ok := store.AppendMessage(inst.ID, AppendInput{Role: RoleAssistant, Text: "Done", SourceID: "assistant:1"})
+	if !ok {
+		t.Fatalf("duplicate append failed")
+	}
+	if appended {
+		t.Fatalf("duplicate assistant should not append a second message")
+	}
+	if got.Status != StatusIdle {
+		t.Fatalf("status = %q, want %q", got.Status, StatusIdle)
+	}
+	if got.CurrentTool != "" {
+		t.Fatalf("current tool = %q, want empty", got.CurrentTool)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("message count = %d, want 1", len(got.Messages))
+	}
+}

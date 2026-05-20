@@ -61,6 +61,16 @@ func TestIsSystemTranscriptEntry(t *testing.T) {
 			text: "<clichat-handoff>\nInternal memory\n</clichat-handoff>",
 			want: true,
 		},
+		{
+			name: "codex AGENTS boot context",
+			text: "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\ninternal context\n</INSTRUCTIONS>",
+			want: true,
+		},
+		{
+			name: "bare instructions boot context",
+			text: "<INSTRUCTIONS>\ninternal context\n</INSTRUCTIONS>",
+			want: true,
+		},
 	}
 
 	for _, tc := range cases {

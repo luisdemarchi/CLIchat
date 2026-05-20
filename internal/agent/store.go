@@ -922,8 +922,7 @@ func (s *Store) AppendMessage(id string, input AppendInput) (Instance, bool, boo
 	if input.SourceID != "" {
 		for _, existing := range inst.Messages {
 			if existing.SourceID == input.SourceID {
-				clone := *cloneInstance(inst)
-				return clone, false, true
+				return s.duplicateAppendResultLocked(inst, input.Role)
 			}
 		}
 		limit := len(inst.Messages)
@@ -933,8 +932,7 @@ func (s *Store) AppendMessage(id string, input AppendInput) (Instance, bool, boo
 		for i := len(inst.Messages) - limit; i < len(inst.Messages); i++ {
 			existing := inst.Messages[i]
 			if existing.Role == input.Role && strings.TrimSpace(existing.Text) == text {
-				clone := *cloneInstance(inst)
-				return clone, false, true
+				return s.duplicateAppendResultLocked(inst, input.Role)
 			}
 		}
 	} else {
@@ -945,8 +943,7 @@ func (s *Store) AppendMessage(id string, input AppendInput) (Instance, bool, boo
 		for i := len(inst.Messages) - limit; i < len(inst.Messages); i++ {
 			existing := inst.Messages[i]
 			if existing.SourceID == "" && existing.Role == input.Role && strings.TrimSpace(existing.Text) == text {
-				clone := *cloneInstance(inst)
-				return clone, false, true
+				return s.duplicateAppendResultLocked(inst, input.Role)
 			}
 		}
 	}
@@ -972,6 +969,7 @@ func (s *Store) AppendMessage(id string, input AppendInput) (Instance, bool, boo
 	}
 	if input.Role == RoleAssistant {
 		inst.Status = StatusIdle
+		inst.CurrentTool = ""
 		// Do NOT blindly clear pending actions here anymore.
 		// They will be cleared by the next User message or if a new
 		// assistant message arrives that doesn't contain a prompt.
@@ -981,6 +979,29 @@ func (s *Store) AppendMessage(id string, input AppendInput) (Instance, bool, boo
 	clone := *cloneInstance(inst)
 	s.emitLocked(Event{Kind: EventInstanceUpdated, ID: inst.ID, Payload: clone})
 	return clone, true, true
+}
+
+func (s *Store) duplicateAppendResultLocked(inst *Instance, role Role) (Instance, bool, bool) {
+	if role == RoleAssistant {
+		changed := false
+		if inst.Status != StatusIdle {
+			inst.Status = StatusIdle
+			changed = true
+		}
+		if inst.CurrentTool != "" {
+			inst.CurrentTool = ""
+			changed = true
+		}
+		if changed {
+			inst.UpdatedAt = timestamp()
+			_ = s.persistLocked()
+			clone := *cloneInstance(inst)
+			s.emitLocked(Event{Kind: EventInstanceUpdated, ID: inst.ID, Payload: clone})
+			return clone, false, true
+		}
+	}
+	clone := *cloneInstance(inst)
+	return clone, false, true
 }
 
 func (s *Store) SetPending(id string, question string, actions []PendingAction) (Instance, bool) {
