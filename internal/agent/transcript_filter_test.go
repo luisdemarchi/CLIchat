@@ -56,6 +56,11 @@ func TestIsSystemTranscriptEntry(t *testing.T) {
 			text: "<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>",
 			want: true,
 		},
+		{
+			name: "internal clichat handoff",
+			text: "<clichat-handoff>\nInternal memory\n</clichat-handoff>",
+			want: true,
+		},
 	}
 
 	for _, tc := range cases {

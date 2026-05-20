@@ -51,6 +51,7 @@ var systemTagSet = map[string]struct{}{
 	"function_calls":          {},
 	"function_results":        {},
 	"environment_context":     {},
+	"clichat-handoff":         {},
 }
 
 func isSystemTranscriptEntry(text string) bool {
@@ -176,14 +177,22 @@ func (w *TranscriptWatcher) discover() {
 		if err != nil || info.ModTime().Before(cutoff) {
 			return nil
 		}
+		providerSessionID, cwd, sessionStarted := codexSessionMeta(path)
+		since := sessionStarted.Add(-2 * time.Minute)
+		if sessionStarted.IsZero() {
+			since = info.ModTime().Add(-2 * time.Minute)
+		}
+		if _, ok := w.store.ClaimTranscriptForInternal("codex", path, providerSessionID, cwd, since); ok {
+			w.trackFromStart(path)
+			return nil
+		}
 		if _, ok := w.store.FindByTranscriptPath(path); ok {
 			w.track(path)
 			return nil
 		}
-		providerSessionID, cwd, sessionStarted := codexSessionMeta(path)
 		// 1) try to attach to a still-unlinked internal Codex chat that matches CWD + time window.
 		if cwd != "" {
-			if inst, ok := w.store.FindAwaitingTranscript("codex", cwd, sessionStarted.Add(-2*time.Minute)); ok {
+			if inst, ok := w.store.FindAwaitingTranscript("codex", cwd, since); ok {
 				w.store.SetTranscriptPath(inst.ID, path)
 				w.store.SetProviderSessionID(inst.ID, providerSessionID)
 				w.track(path)
@@ -308,6 +317,12 @@ func (w *TranscriptWatcher) track(path string) {
 	if _, tracked := w.cursors[path]; !tracked {
 		w.cursors[path] = &transcriptCursor{path: path, seen: make(map[string]bool)}
 	}
+}
+
+func (w *TranscriptWatcher) trackFromStart(path string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.cursors[path] = &transcriptCursor{path: path, seen: make(map[string]bool)}
 }
 
 func (w *TranscriptWatcher) poll() {

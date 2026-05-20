@@ -894,6 +894,7 @@ func conversationHandoffPrompt(inst agent.Instance, prov provider.Provider, memo
 	}
 	topic := strings.TrimSpace(firstNonEmpty(memory.Topic, inst.Topic, inst.Title))
 	var b strings.Builder
+	b.WriteString("<clichat-handoff>\n")
 	b.WriteString("You are taking over an existing CLIchat conversation.\n")
 	b.WriteString("This is the same chat; only the terminal/agent changed to ")
 	b.WriteString(prov.Name)
@@ -907,6 +908,7 @@ func conversationHandoffPrompt(inst agent.Instance, prov provider.Provider, memo
 	b.WriteString("Reply only with a short sentence saying you have taken over the conversation and wait for the next instruction, unless there is a clear pending request.\n\n")
 	b.WriteString("Internal memory for this conversation:\n")
 	b.WriteString(summary)
+	b.WriteString("\n</clichat-handoff>")
 	return b.String()
 }
 

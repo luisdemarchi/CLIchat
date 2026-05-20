@@ -305,8 +305,9 @@ func (s *Store) FindByProviderSessionID(providerID string, providerSessionID str
 // FindAwaitingTranscript looks for an internal instance that
 //   - matches `providerID`,
 //   - has no `TranscriptPath` linked yet,
-//   - was created no earlier than `since` (to avoid attaching old internals to a
-//     freshly-spawned external transcript), and
+//   - has an attached terminal whose most recent update is no earlier than
+//     `since` (important when an old chat is transferred into a fresh terminal),
+//     and
 //   - has matching `cwd` (exact, parent or child path) — only when `cwd` is
 //     non-empty on both sides. If either side is empty we DO NOT match, to
 //     prevent the previous bug where any rollout would land in any chat.
@@ -316,10 +317,21 @@ func (s *Store) FindAwaitingTranscript(providerID string, cwd string, since time
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	best := s.findAwaitingTranscriptLocked(providerID, cwd, since)
+	if best != nil {
+		return *cloneInstance(best), true
+	}
+	return Instance{}, false
+}
+
+func (s *Store) findAwaitingTranscriptLocked(providerID string, cwd string, since time.Time) *Instance {
 	var best *Instance
 	var bestDistance time.Duration
 	for _, inst := range s.instances {
 		if inst.Origin != OriginInternal || inst.ProviderID != providerID || inst.TranscriptPath != "" {
+			continue
+		}
+		if !inst.TerminalAttached {
 			continue
 		}
 		if strings.TrimSpace(inst.CWD) == "" {
@@ -328,16 +340,16 @@ func (s *Store) FindAwaitingTranscript(providerID string, cwd string, since time
 		if !cwdMatches(inst.CWD, cwd) {
 			continue
 		}
-		created, err := time.Parse(time.RFC3339Nano, inst.CreatedAt)
+		matchedAt, err := transcriptMatchTime(inst)
 		if !since.IsZero() {
-			if err == nil && created.Before(since) {
+			if err == nil && matchedAt.Before(since) {
 				continue
 			}
 		}
 		distance := time.Duration(0)
 		if err == nil && !since.IsZero() {
 			sessionStarted := since.Add(2 * time.Minute)
-			distance = created.Sub(sessionStarted)
+			distance = matchedAt.Sub(sessionStarted)
 			if distance < 0 {
 				distance = -distance
 			}
@@ -348,9 +360,66 @@ func (s *Store) FindAwaitingTranscript(providerID string, cwd string, since time
 		}
 	}
 	if best != nil {
-		return *cloneInstance(best), true
+		return best
 	}
-	return Instance{}, false
+	return nil
+}
+
+func transcriptMatchTime(inst *Instance) (time.Time, error) {
+	if inst == nil {
+		return time.Time{}, errors.New("instance is nil")
+	}
+	if inst.TerminalAttached && strings.TrimSpace(inst.UpdatedAt) != "" {
+		return time.Parse(time.RFC3339Nano, inst.UpdatedAt)
+	}
+	return time.Parse(time.RFC3339Nano, inst.CreatedAt)
+}
+
+// ClaimTranscriptForInternal links a provider transcript to the matching
+// app-managed chat. If the watcher had already created a duplicate external
+// instance for the same transcript, that duplicate is removed so future polling
+// and UI state resolve to the real chat.
+func (s *Store) ClaimTranscriptForInternal(providerID string, path string, providerSessionID string, cwd string, since time.Time) (Instance, bool) {
+	providerID = strings.TrimSpace(providerID)
+	path = strings.TrimSpace(path)
+	if providerID == "" || path == "" {
+		return Instance{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var externalID string
+	for _, inst := range s.instances {
+		if inst.ProviderID != providerID || inst.TranscriptPath != path {
+			continue
+		}
+		if inst.Origin == OriginInternal {
+			return *cloneInstance(inst), true
+		}
+		if inst.Origin == OriginExternal {
+			externalID = inst.ID
+		}
+	}
+
+	inst := s.findAwaitingTranscriptLocked(providerID, cwd, since)
+	if inst == nil {
+		return Instance{}, false
+	}
+	inst.TranscriptPath = path
+	inst.TranscriptOffset = 0
+	if strings.TrimSpace(providerSessionID) != "" {
+		inst.ProviderSessionID = strings.TrimSpace(providerSessionID)
+	}
+	inst.UpdatedAt = timestamp()
+	events := []Event{{Kind: EventInstanceUpdated, ID: inst.ID, Payload: *cloneInstance(inst)}}
+	if externalID != "" {
+		delete(s.instances, externalID)
+		events = append(events, Event{Kind: EventInstanceRemoved, ID: externalID})
+	}
+	_ = s.persistLocked()
+	clone := *cloneInstance(inst)
+	s.emitLocked(events...)
+	return clone, true
 }
 
 func cwdMatches(a, b string) bool {
@@ -853,7 +922,7 @@ func (s *Store) AppendMessage(id string, input AppendInput) (Instance, bool, boo
 		}
 		for i := len(inst.Messages) - limit; i < len(inst.Messages); i++ {
 			existing := inst.Messages[i]
-			if existing.SourceID == "" && existing.Role == input.Role && strings.TrimSpace(existing.Text) == text {
+			if existing.Role == input.Role && strings.TrimSpace(existing.Text) == text {
 				clone := *cloneInstance(inst)
 				return clone, false, true
 			}
