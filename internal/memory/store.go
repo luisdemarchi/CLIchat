@@ -128,8 +128,6 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
   INSERT INTO messages_fts(rowid, conversation_id, role, text)
   VALUES (new.rowid, new.conversation_id, new.role, new.text);
 END;
-
-INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
 `)
 	return err
 }
@@ -346,7 +344,7 @@ func (s *Store) run(sql string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cmd := exec.Command(s.sqlite, s.path)
-	cmd.Stdin = strings.NewReader(sql)
+	cmd.Stdin = strings.NewReader(".timeout 5000\n" + sql)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

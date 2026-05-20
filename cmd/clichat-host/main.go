@@ -80,9 +80,6 @@ func main() {
 		prompts:   agent.NewPromptDetector(),
 		eventSubs: make(map[string]map[int]chan hostEvent),
 	}
-	if err := s.memory.SyncSnapshot(store.Snapshot()); err != nil {
-		log.Printf("memory initial sync: %v", err)
-	}
 	store.Subscribe(s.syncMemoryEvents)
 	s.watcher = agent.NewTranscriptWatcher(store)
 
@@ -103,6 +100,12 @@ func main() {
 	mux.HandleFunc("/v1/memory/", s.memoryRoute)
 	mux.HandleFunc("/v1/instances", s.instancesCollection)
 	mux.HandleFunc("/v1/instances/", s.instance)
+
+	go func(snapshot []agent.Instance) {
+		if err := s.memory.SyncSnapshot(snapshot); err != nil {
+			log.Printf("memory initial sync: %v", err)
+		}
+	}(store.Snapshot())
 
 	log.Printf("clichat-host listening http=%s attach=%s state=%s memory=%s", *httpAddr, *attachAddr, *statePath, *memoryPath)
 	if err := http.ListenAndServe(*httpAddr, mux); err != nil {

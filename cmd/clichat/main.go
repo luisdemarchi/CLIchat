@@ -765,6 +765,7 @@ func runUninstall() error {
 		_ = launchctl("bootout", launchdUserDomain(), plist)
 		_ = exec.Command("launchctl", "unload", plist).Run()
 		_ = os.Remove(plist)
+		_ = launchctl("disable", launchdUserTarget())
 		_ = os.RemoveAll("/Applications/CLIchat.app")
 	case "linux":
 		_ = exec.Command("systemctl", "--user", "disable", "--now", "clichat.service").Run()
@@ -1002,13 +1003,22 @@ func installService(hostBin string, logDir string) error {
 			return err
 		}
 		domain := launchdUserDomain()
+		target := launchdUserTarget()
 		_ = launchctl("bootout", domain, plist)
+		_ = launchctl("enable", target)
 		if err := launchctl("bootstrap", domain, plist); err != nil {
-			if fallbackErr := exec.Command("launchctl", "load", plist).Run(); fallbackErr != nil {
+			if fallbackErr := exec.Command("launchctl", "load", "-w", plist).Run(); fallbackErr != nil {
 				return err
 			}
 		}
-		return launchctl("kickstart", "-k", domain+"/com.clichat.host")
+		_ = launchctl("enable", target)
+		if err := launchctl("kickstart", "-k", target); err != nil {
+			if waitErr := waitForHost(3 * time.Second); waitErr == nil {
+				return nil
+			}
+			return err
+		}
+		return waitForHost(3 * time.Second)
 	case "linux":
 		service := filepath.Join(mustHome(), ".config", "systemd", "user", "clichat.service")
 		if err := os.MkdirAll(filepath.Dir(service), 0o755); err != nil {
@@ -1042,12 +1052,33 @@ func launchdUserDomain() string {
 	return fmt.Sprintf("gui/%d", os.Getuid())
 }
 
+func launchdUserTarget() string {
+	return launchdUserDomain() + "/com.clichat.host"
+}
+
 func launchctl(args ...string) error {
 	out, err := exec.Command("launchctl", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("launchctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func waitForHost(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if _, err := getJSON(defaultHTTPBaseURL+"/health", 800*time.Millisecond); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = errorsNew("host did not report healthy")
+	}
+	return lastErr
 }
 
 func needCommand(name string) error {
