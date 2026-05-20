@@ -642,6 +642,10 @@ func (s *server) instanceStartTerminal(w http.ResponseWriter, r *http.Request, i
 			effectiveCWD = sandbox
 		}
 	}
+	// A fresh provider process always creates a fresh transcript. Clear any
+	// previous transcript link so the watcher can claim the new file for this
+	// internal chat instead of registering it as an external duplicate.
+	s.store.SetTranscriptPath(id, "")
 	var processPID int
 	process, err := s.manager.Start(terminal.StartOptions{
 		SessionID:  id,

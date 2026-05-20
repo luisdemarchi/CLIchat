@@ -92,3 +92,72 @@ func TestTranscriptWatcherClaimsCodexTranscriptForTransferredInternalChat(t *tes
 		t.Fatalf("assistant response was not appended to the internal chat")
 	}
 }
+
+func TestTranscriptWatcherClaimsGeminiTranscriptFromSandboxFolder(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	internal := store.CreateInternal(CreateInternalInput{ProviderID: "gemini", CWD: ""})
+	cwd := filepath.Join(home, ".clichat", "sandbox", internal.ID)
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.instances[internal.ID].CWD = cwd
+	store.instances[internal.ID].UpdatedAt = time.Now().Add(-1 * time.Second).UTC().Format(time.RFC3339Nano)
+	store.instances[internal.ID].TerminalAttached = true
+	store.instances[internal.ID].Status = StatusBusy
+	store.mu.Unlock()
+
+	transcript := filepath.Join(home, ".gemini", "tmp", internal.ID, "chats", "session-2026-05-20T17-21-c733ed4b.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		`{"type":"user","content":"oi"}`,
+		`{"type":"gemini","content":"Olá! Como posso ajudar?"}`,
+	}
+	if err := os.WriteFile(transcript, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	watcher := NewTranscriptWatcher(store)
+	watcher.discover()
+	watcher.poll()
+
+	got, ok := store.Get(internal.ID)
+	if !ok {
+		t.Fatalf("internal chat disappeared")
+	}
+	if got.TranscriptPath != transcript {
+		t.Fatalf("TranscriptPath = %q, want %q", got.TranscriptPath, transcript)
+	}
+	if got.Status != StatusIdle {
+		t.Fatalf("Status = %q, want %q", got.Status, StatusIdle)
+	}
+	var sawAssistant bool
+	for _, msg := range got.Messages {
+		if msg.Role == RoleAssistant && strings.Contains(msg.Text, "Como posso ajudar") {
+			sawAssistant = true
+		}
+	}
+	if !sawAssistant {
+		t.Fatalf("assistant response was not appended to the internal Gemini chat")
+	}
+}
+
+func TestGeminiCWDHintExpandsCLIchatSandboxID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	id := "c733ed4b2bf1e9bff18b41d977f1e244"
+	path := filepath.Join(home, ".gemini", "tmp", id, "chats", "session-2026-05-20T17-21-c733ed4b.jsonl")
+	got := geminiCWDHint(path)
+	want := filepath.Join(home, ".clichat", "sandbox", id)
+	if got != want {
+		t.Fatalf("geminiCWDHint() = %q, want %q", got, want)
+	}
+}

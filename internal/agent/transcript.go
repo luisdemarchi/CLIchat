@@ -316,7 +316,24 @@ func geminiCWDHint(path string) string {
 	if parent == "" || parent == "tmp" || parent == "stitch" {
 		return ""
 	}
+	if looksLikeHexID(parent, 32) {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, ".clichat", "sandbox", parent)
+		}
+	}
 	return parent
+}
+
+func looksLikeHexID(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *TranscriptWatcher) track(path string) {

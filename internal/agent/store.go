@@ -391,7 +391,7 @@ func (s *Store) ClaimTranscriptForInternal(providerID string, path string, provi
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var externalID string
+	var external *Instance
 	for _, inst := range s.instances {
 		if inst.ProviderID != providerID || inst.TranscriptPath != path {
 			continue
@@ -400,7 +400,7 @@ func (s *Store) ClaimTranscriptForInternal(providerID string, path string, provi
 			return *cloneInstance(inst), true
 		}
 		if inst.Origin == OriginExternal {
-			externalID = inst.ID
+			external = inst
 		}
 	}
 
@@ -410,6 +410,9 @@ func (s *Store) ClaimTranscriptForInternal(providerID string, path string, provi
 	}
 	inst.TranscriptPath = path
 	inst.TranscriptOffset = 0
+	if external != nil {
+		s.mergeMessagesLocked(inst, external.Messages)
+	}
 	if strings.TrimSpace(providerSessionID) != "" {
 		inst.ProviderSessionID = strings.TrimSpace(providerSessionID)
 		if providerID == "claude" {
@@ -418,9 +421,9 @@ func (s *Store) ClaimTranscriptForInternal(providerID string, path string, provi
 	}
 	inst.UpdatedAt = timestamp()
 	events := []Event{{Kind: EventInstanceUpdated, ID: inst.ID, Payload: *cloneInstance(inst)}}
-	if externalID != "" {
-		delete(s.instances, externalID)
-		events = append(events, Event{Kind: EventInstanceRemoved, ID: externalID})
+	if external != nil {
+		delete(s.instances, external.ID)
+		events = append(events, Event{Kind: EventInstanceRemoved, ID: external.ID})
 	}
 	_ = s.persistLocked()
 	clone := *cloneInstance(inst)
@@ -443,6 +446,83 @@ func isDirectChild(parent string, child string) bool {
 		return false
 	}
 	return !strings.Contains(rel, string(filepath.Separator))
+}
+
+func (s *Store) mergeExternalTranscriptsLocked(target *Instance, providerID string) []string {
+	if target == nil || target.Origin != OriginInternal {
+		return nil
+	}
+	var removed []string
+	for id, inst := range s.instances {
+		if inst == nil || inst.Origin != OriginExternal || inst.ProviderID != providerID {
+			continue
+		}
+		if !cwdMatches(target.CWD, inst.CWD) {
+			continue
+		}
+		s.mergeMessagesLocked(target, inst.Messages)
+		delete(s.instances, id)
+		removed = append(removed, id)
+	}
+	return removed
+}
+
+func (s *Store) mergeMessagesLocked(target *Instance, messages []Message) {
+	if target == nil || len(messages) == 0 {
+		return
+	}
+	seenSource := make(map[string]struct{})
+	seenText := make(map[string]struct{})
+	for _, msg := range target.Messages {
+		if msg.SourceID != "" {
+			seenSource[msg.SourceID] = struct{}{}
+		}
+		seenText[messageDedupeKey(msg)] = struct{}{}
+	}
+	changed := false
+	for _, msg := range messages {
+		if strings.TrimSpace(msg.Text) == "" {
+			continue
+		}
+		if msg.SourceID != "" {
+			if _, ok := seenSource[msg.SourceID]; ok {
+				continue
+			}
+		}
+		key := messageDedupeKey(msg)
+		if _, ok := seenText[key]; ok {
+			continue
+		}
+		target.Messages = append(target.Messages, msg)
+		if msg.SourceID != "" {
+			seenSource[msg.SourceID] = struct{}{}
+		}
+		seenText[key] = struct{}{}
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	sort.SliceStable(target.Messages, func(i, j int) bool {
+		left, leftErr := time.Parse(time.RFC3339Nano, target.Messages[i].CreatedAt)
+		right, rightErr := time.Parse(time.RFC3339Nano, target.Messages[j].CreatedAt)
+		if leftErr != nil || rightErr != nil {
+			return target.Messages[i].CreatedAt < target.Messages[j].CreatedAt
+		}
+		return left.Before(right)
+	})
+	if len(target.Messages) > 0 {
+		last := target.Messages[len(target.Messages)-1]
+		target.LastMessage = last.Text
+		if last.Role == RoleAssistant {
+			target.Status = StatusIdle
+			target.CurrentTool = ""
+		}
+	}
+}
+
+func messageDedupeKey(msg Message) string {
+	return string(msg.Role) + "\x00" + strings.TrimSpace(msg.Text)
 }
 
 // UpdateCWD overwrites the CWD on an instance (used after start-terminal so
@@ -549,6 +629,7 @@ func (s *Store) SetProvider(id string, providerID string) (Instance, bool) {
 	if inst.ProviderID == providerID {
 		return *cloneInstance(inst), true
 	}
+	removedExternalIDs := s.mergeExternalTranscriptsLocked(inst, inst.ProviderID)
 	inst.ProviderID = providerID
 	inst.ProviderSessionID = ""
 	if providerID == "gemini" {
@@ -567,7 +648,11 @@ func (s *Store) SetProvider(id string, providerID string) (Instance, bool) {
 	inst.UpdatedAt = timestamp()
 	_ = s.persistLocked()
 	clone := *cloneInstance(inst)
-	s.emitLocked(Event{Kind: EventInstanceUpdated, ID: inst.ID, Payload: clone})
+	events := []Event{{Kind: EventInstanceUpdated, ID: inst.ID, Payload: clone}}
+	for _, externalID := range removedExternalIDs {
+		events = append(events, Event{Kind: EventInstanceRemoved, ID: externalID})
+	}
+	s.emitLocked(events...)
 	return clone, true
 }
 
