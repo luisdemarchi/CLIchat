@@ -9,6 +9,7 @@ declare global {
           SelectSession: (id: string) => Promise<Session>;
           DeleteSession: (id: string) => Promise<void>;
           ReconnectSession: (id: string) => Promise<void>;
+          SetSessionProvider: (input: { sessionId: string; providerId: ProviderId }) => Promise<Session>;
           OpenSessionTerminal: (input: { sessionId: string; providerId?: ProviderId }) => Promise<Session>;
           CreateChat: (input: { providerId: ProviderId; title: string; cwd: string }) => Promise<Session>;
           SendMessage: (input: { sessionId: string; text: string }) => Promise<Session>;
@@ -111,6 +112,14 @@ export async function openSessionTerminal(input: { sessionId: string; providerId
   const api = bridge();
   if (api?.OpenSessionTerminal) {
     return api.OpenSessionTerminal(input);
+  }
+  throw new Error('Wails backend unavailable.');
+}
+
+export async function setSessionProvider(input: { sessionId: string; providerId: ProviderId }): Promise<Session> {
+  const api = bridge();
+  if (api?.SetSessionProvider) {
+    return api.SetSessionProvider(input);
   }
   throw new Error('Wails backend unavailable.');
 }

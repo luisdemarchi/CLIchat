@@ -106,6 +106,8 @@ type Store struct {
 	nextSub   int
 }
 
+const transcriptClaimMaxSkew = 3 * time.Minute
+
 func NewStore(path string) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("path is required")
@@ -122,6 +124,7 @@ func NewStore(path string) (*Store, error) {
 		return nil, err
 	}
 	store.mergeLoadedExternalDuplicates()
+	store.repairLoadedGeminiSandboxMessages()
 	store.markBootOffline()
 	return store, nil
 }
@@ -135,6 +138,48 @@ func (s *Store) mergeLoadedExternalDuplicates() {
 			continue
 		}
 		if removed := s.mergeExternalTranscriptsLocked(inst, inst.ProviderID); len(removed) > 0 {
+			changed = true
+		}
+	}
+	if changed {
+		_ = s.persistLocked()
+	}
+}
+
+func (s *Store) repairLoadedGeminiSandboxMessages() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	targetBySandboxID := make(map[string]*Instance)
+	for _, inst := range s.instances {
+		if inst == nil || inst.Origin != OriginInternal {
+			continue
+		}
+		if sandboxID := sandboxIDFromPath(inst.CWD); sandboxID != "" {
+			targetBySandboxID[sandboxID] = inst
+		}
+	}
+
+	changed := false
+	for _, inst := range s.instances {
+		if inst == nil || inst.Origin != OriginInternal || len(inst.Messages) == 0 {
+			continue
+		}
+		var kept []Message
+		moved := false
+		for _, msg := range inst.Messages {
+			sandboxID := geminiSandboxIDFromSourceID(msg.SourceID)
+			target := targetBySandboxID[sandboxID]
+			if sandboxID == "" || target == nil || target.ID == inst.ID {
+				kept = append(kept, msg)
+				continue
+			}
+			s.mergeMessagesLocked(target, []Message{msg})
+			moved = true
+		}
+		if moved {
+			inst.Messages = kept
+			refreshInstanceSummary(inst)
 			changed = true
 		}
 	}
@@ -370,6 +415,9 @@ func (s *Store) findAwaitingTranscriptLocked(providerID string, cwd string, sinc
 		distance := time.Duration(0)
 		if err == nil && !since.IsZero() {
 			sessionStarted := since.Add(2 * time.Minute)
+			if matchedAt.After(sessionStarted.Add(transcriptClaimMaxSkew)) {
+				continue
+			}
 			distance = matchedAt.Sub(sessionStarted)
 			if distance < 0 {
 				distance = -distance
@@ -450,8 +498,13 @@ func (s *Store) ClaimTranscriptForInternal(providerID string, path string, provi
 }
 
 func cwdMatches(a, b string) bool {
-	a = filepath.Clean(strings.TrimSpace(a))
-	b = filepath.Clean(strings.TrimSpace(b))
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
 	if a == b {
 		return true
 	}
@@ -469,6 +522,23 @@ func sandboxIDFromPath(path string) string {
 	base := filepath.Base(filepath.Clean(path))
 	if looksLikeHexID(base, 32) {
 		return strings.ToLower(base)
+	}
+	return ""
+}
+
+func geminiSandboxIDFromSourceID(sourceID string) string {
+	sourceID = strings.TrimSpace(sourceID)
+	if sourceID == "" {
+		return ""
+	}
+	parts := strings.Split(filepath.Clean(sourceID), string(filepath.Separator))
+	for i := 0; i+2 < len(parts); i++ {
+		if parts[i] != ".gemini" || parts[i+1] != "tmp" {
+			continue
+		}
+		if looksLikeHexID(parts[i+2], 32) {
+			return strings.ToLower(parts[i+2])
+		}
 	}
 	return ""
 }
@@ -545,12 +615,23 @@ func (s *Store) mergeMessagesLocked(target *Instance, messages []Message) {
 		return left.Before(right)
 	})
 	if len(target.Messages) > 0 {
-		last := target.Messages[len(target.Messages)-1]
-		target.LastMessage = last.Text
-		if last.Role == RoleAssistant {
-			target.Status = StatusIdle
-			target.CurrentTool = ""
-		}
+		refreshInstanceSummary(target)
+	}
+}
+
+func refreshInstanceSummary(inst *Instance) {
+	if inst == nil {
+		return
+	}
+	if len(inst.Messages) == 0 {
+		inst.LastMessage = ""
+		return
+	}
+	last := inst.Messages[len(inst.Messages)-1]
+	inst.LastMessage = last.Text
+	if last.Role == RoleAssistant {
+		inst.Status = StatusIdle
+		inst.CurrentTool = ""
 	}
 }
 

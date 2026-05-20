@@ -28,6 +28,7 @@ import {
   sendFiles,
   sendMessage,
   sendTerminalInput,
+  setSessionProvider,
 } from './lib/api';
 import type { Bootstrap, Message, ProviderId, Session } from './types';
 import { TerminalPane } from './components/TerminalPane';
@@ -326,6 +327,19 @@ export function App() {
       const updated = await openSessionTerminal({ sessionId: selected.id, providerId });
       setSelectedID(updated.id);
       setTerminalOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleSetSessionProvider(providerId: ProviderId) {
+    if (!selected || providerId === selected.providerId) return;
+    setError('');
+    setTransferOpen(false);
+    try {
+      const updated = await setSessionProvider({ sessionId: selected.id, providerId });
+      setSelectedID(updated.id);
+      setTerminalOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -653,7 +667,7 @@ export function App() {
                 </button>
                 {transferOpen ? (
                   <div className="provider-menu transfer-menu" role="menu">
-                    {state.providers.map((p) => (
+                    {state.providers.filter((p) => p.id !== selected.providerId).map((p) => (
                       <button
                         key={p.id}
                         type="button"
@@ -661,16 +675,15 @@ export function App() {
                         disabled={!p.available}
                         title={
                           p.available
-                            ? `Open ${p.name} in this conversation`
+                            ? `Switch this conversation to ${p.name}`
                             : `${p.name} CLI not found`
                         }
-                        onClick={() => void handleOpenSessionTerminal(p.id)}
+                        onClick={() => void handleSetSessionProvider(p.id)}
                       >
                         <span className="logo" style={{ background: p.accent }}>
                           <ProviderLogo providerId={p.id} size={14} />
                         </span>
                         <span className="label">{p.name}</span>
-                        {p.id === selected.providerId ? <span className="hint">current</span> : null}
                         {!p.available ? <span className="hint">unavailable</span> : null}
                       </button>
                     ))}
@@ -717,10 +730,10 @@ export function App() {
                         type="button"
                         key={p.id}
                         disabled={!p.available}
-                        onClick={() => void handleOpenSessionTerminal(p.id)}
+                        onClick={() => void handleSetSessionProvider(p.id)}
                       >
                         <ProviderLogo providerId={p.id} size={15} />
-                        <span>Use {p.name}</span>
+                        <span>Switch to {p.name}</span>
                       </button>
                     ))}
                 </div>

@@ -58,6 +58,28 @@ func TestFindAwaitingTranscriptUsesTerminalUpdatedAtForTransferredChat(t *testin
 	}
 }
 
+func TestFindAwaitingTranscriptRejectsStaleTranscriptForFreshTerminal(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := filepath.Join(t.TempDir(), "sandbox")
+	inst := store.CreateInternal(CreateInternalInput{ProviderID: "codex", CWD: cwd})
+
+	oldSessionStarted := time.Date(2026, 5, 20, 14, 41, 18, 0, time.UTC)
+	freshTerminalStarted := time.Date(2026, 5, 20, 14, 45, 58, 0, time.UTC)
+	store.mu.Lock()
+	store.instances[inst.ID].UpdatedAt = freshTerminalStarted.Format(time.RFC3339Nano)
+	store.instances[inst.ID].TerminalAttached = true
+	store.instances[inst.ID].TranscriptPath = ""
+	store.mu.Unlock()
+
+	_, ok := store.FindAwaitingTranscript("codex", cwd, oldSessionStarted.Add(-2*time.Minute))
+	if ok {
+		t.Fatalf("stale transcript should not claim a freshly started terminal")
+	}
+}
+
 func TestClaimTranscriptForInternalRemovesDuplicateExternal(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
@@ -216,6 +238,60 @@ func TestNewStoreMergesLoadedExternalWithSandboxIDOnlyCWD(t *testing.T) {
 	}
 	if !sawAssistant {
 		t.Fatalf("loaded external Gemini message was not merged into internal chat")
+	}
+}
+
+func TestCWDMatchesRejectsEmptyPath(t *testing.T) {
+	if cwdMatches("", "c733ed4b2bf1e9bff18b41d977f1e244") {
+		t.Fatalf("empty cwd should not match a sandbox id")
+	}
+	if cwdMatches("c733ed4b2bf1e9bff18b41d977f1e244", "") {
+		t.Fatalf("sandbox id should not match empty cwd")
+	}
+}
+
+func TestNewStoreRepairsMisassignedGeminiSandboxMessages(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store, err := NewStore(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandboxID := "c733ed4b2bf1e9bff18b41d977f1e244"
+	target := store.CreateInternal(CreateInternalInput{
+		ProviderID: "gemini",
+		CWD:        filepath.Join(t.TempDir(), ".clichat", "sandbox", sandboxID),
+	})
+	wrong := store.CreateInternal(CreateInternalInput{ProviderID: "gemini"})
+	sourceID := filepath.Join("/Users/luis/.gemini/tmp", sandboxID, "chats", "session.jsonl") + ":88"
+	if _, appended, ok := store.AppendMessage(wrong.ID, AppendInput{Role: RoleAssistant, Text: "Gemini answered in the wrong chat.", SourceID: sourceID}); !ok || !appended {
+		t.Fatalf("expected misassigned assistant append")
+	}
+
+	reloaded, err := NewStore(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTarget, ok := reloaded.Get(target.ID)
+	if !ok {
+		t.Fatalf("target instance missing after reload")
+	}
+	var sawTarget bool
+	for _, msg := range gotTarget.Messages {
+		if msg.SourceID == sourceID && msg.Text == "Gemini answered in the wrong chat." {
+			sawTarget = true
+		}
+	}
+	if !sawTarget {
+		t.Fatalf("misassigned Gemini message was not moved into the sandbox owner chat")
+	}
+	gotWrong, ok := reloaded.Get(wrong.ID)
+	if !ok {
+		t.Fatalf("wrong instance missing after reload")
+	}
+	for _, msg := range gotWrong.Messages {
+		if msg.SourceID == sourceID {
+			t.Fatalf("misassigned Gemini message was left in the wrong chat")
+		}
 	}
 }
 

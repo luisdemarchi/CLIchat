@@ -92,6 +92,11 @@ type OpenSessionTerminalInput struct {
 	ProviderID string `json:"providerId,omitempty"`
 }
 
+type SetSessionProviderInput struct {
+	SessionID  string `json:"sessionId"`
+	ProviderID string `json:"providerId"`
+}
+
 type TerminalActionInput struct {
 	SessionID string `json:"sessionId"`
 	ActionID  string `json:"actionId"`
@@ -407,6 +412,69 @@ func (a *App) CreateChat(input CreateInput) (Session, error) {
 	return a.toSession(updated), nil
 }
 
+func (a *App) SetSessionProvider(input SetSessionProviderInput) (Session, error) {
+	id := strings.TrimSpace(input.SessionID)
+	providerID := strings.TrimSpace(input.ProviderID)
+	if id == "" {
+		return Session{}, errors.New("session id is required")
+	}
+	if providerID == "" {
+		return Session{}, errors.New("providerId is required")
+	}
+
+	a.mu.RLock()
+	inst, ok := a.instances[id]
+	a.mu.RUnlock()
+	if !ok {
+		return Session{}, errors.New("session not found")
+	}
+	if inst.Origin != agent.OriginInternal {
+		return a.toSession(inst), errors.New("external sessions are read-only")
+	}
+	if inst.ProviderID == providerID {
+		return a.toSession(inst), errors.New("provider is already active")
+	}
+
+	prov, ok := a.providerByID(provider.ID(providerID))
+	if !ok {
+		return a.toSession(inst), fmt.Errorf("unknown provider: %s", providerID)
+	}
+	if !prov.Available {
+		return a.toSession(inst), fmt.Errorf("%s CLI not found", prov.Name)
+	}
+	previousProviderName := providerDisplayName(inst.ProviderID)
+	if previousProvider, ok := a.providerByID(provider.ID(inst.ProviderID)); ok && previousProvider.Name != "" {
+		previousProviderName = previousProvider.Name
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := a.host.Health(ctx); err != nil {
+		return a.toSession(inst), errors.New("clichat-host is offline. Run: clichat-host serve")
+	}
+
+	_, _ = a.host.StopTerminal(ctx, inst.ID)
+	a.forgetOutputSubscription(inst.ID)
+
+	updated, err := a.host.SetProvider(ctx, inst.ID, providerID)
+	if err != nil {
+		return a.toSession(inst), err
+	}
+	a.applyInstance(updated)
+
+	systemMessage := fmt.Sprintf("Conversation transferred from %s to %s. Open a terminal to continue.", previousProviderName, prov.Name)
+	withMessage, err := a.host.AppendMessage(ctx, updated.ID, agent.RoleSystem, systemMessage)
+	if err != nil {
+		return a.toSession(updated), err
+	}
+	a.applyInstance(withMessage)
+	a.mu.Lock()
+	a.selected = withMessage.ID
+	a.mu.Unlock()
+	a.emitState()
+	return a.toSession(withMessage), nil
+}
+
 func (a *App) OpenSessionTerminal(input OpenSessionTerminalInput) (Session, error) {
 	id := strings.TrimSpace(input.SessionID)
 	if id == "" {
@@ -427,17 +495,15 @@ func (a *App) OpenSessionTerminal(input OpenSessionTerminalInput) (Session, erro
 	if providerID == "" {
 		providerID = inst.ProviderID
 	}
+	if providerID != inst.ProviderID {
+		return a.toSession(inst), errors.New("change provider before opening a terminal")
+	}
 	prov, ok := a.providerByID(provider.ID(providerID))
 	if !ok {
 		return a.toSession(inst), fmt.Errorf("unknown provider: %s", providerID)
 	}
 	if !prov.Available {
 		return a.toSession(inst), fmt.Errorf("%s CLI not found", prov.Name)
-	}
-	previousProviderID := inst.ProviderID
-	previousProviderName := providerDisplayName(previousProviderID)
-	if previousProvider, ok := a.providerByID(provider.ID(previousProviderID)); ok && previousProvider.Name != "" {
-		previousProviderName = previousProvider.Name
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -449,13 +515,6 @@ func (a *App) OpenSessionTerminal(input OpenSessionTerminalInput) (Session, erro
 	_, _ = a.host.StopTerminal(ctx, inst.ID)
 	a.forgetOutputSubscription(inst.ID)
 
-	if inst.ProviderID != providerID {
-		updated, err := a.host.SetProvider(ctx, inst.ID, providerID)
-		if err != nil {
-			return a.toSession(inst), err
-		}
-		inst = updated
-	}
 	memory, _ := a.host.ConversationMemory(ctx, inst.ID)
 
 	startCWD := sessionCWD(inst.ID, inst.CWD)
@@ -486,9 +545,6 @@ func (a *App) OpenSessionTerminal(input OpenSessionTerminalInput) (Session, erro
 	handoff := conversationHandoffPrompt(started, prov, memory)
 	if handoff != "" {
 		systemMessage := fmt.Sprintf("Terminal %s started with the chat memory.", prov.Name)
-		if previousProviderID != providerID {
-			systemMessage = fmt.Sprintf("Conversation transferred from %s to %s. Terminal %s started with the chat memory.", previousProviderName, prov.Name, prov.Name)
-		}
 		_, _ = a.host.AppendMessage(ctx, started.ID, agent.RoleSystem,
 			systemMessage)
 		_, _ = a.host.SetStatus(ctx, started.ID, agent.StatusBusy, "")
