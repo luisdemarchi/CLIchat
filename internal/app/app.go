@@ -434,6 +434,11 @@ func (a *App) OpenSessionTerminal(input OpenSessionTerminalInput) (Session, erro
 	if !prov.Available {
 		return a.toSession(inst), fmt.Errorf("%s CLI not found", prov.Name)
 	}
+	previousProviderID := inst.ProviderID
+	previousProviderName := providerDisplayName(previousProviderID)
+	if previousProvider, ok := a.providerByID(provider.ID(previousProviderID)); ok && previousProvider.Name != "" {
+		previousProviderName = previousProvider.Name
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -480,8 +485,12 @@ func (a *App) OpenSessionTerminal(input OpenSessionTerminalInput) (Session, erro
 
 	handoff := conversationHandoffPrompt(started, prov, memory)
 	if handoff != "" {
+		systemMessage := fmt.Sprintf("Terminal %s started with the chat memory.", prov.Name)
+		if previousProviderID != providerID {
+			systemMessage = fmt.Sprintf("Conversation transferred from %s to %s. Terminal %s started with the chat memory.", previousProviderName, prov.Name, prov.Name)
+		}
 		_, _ = a.host.AppendMessage(ctx, started.ID, agent.RoleSystem,
-			fmt.Sprintf("Terminal %s started with the chat memory.", prov.Name))
+			systemMessage)
 		_, _ = a.host.SetStatus(ctx, started.ID, agent.StatusBusy, "")
 		if err := a.host.SendText(ctx, started.ID, handoff); err != nil {
 			_, _ = a.host.SetStatus(ctx, started.ID, agent.StatusWaiting, "")
@@ -498,6 +507,14 @@ func (a *App) OpenSessionTerminal(input OpenSessionTerminalInput) (Session, erro
 	}
 	a.emitState()
 	return a.toSession(started), nil
+}
+
+func providerDisplayName(providerID string) string {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return "Unknown"
+	}
+	return strings.ToUpper(providerID[:1]) + providerID[1:]
 }
 
 // FocusTerminal brings the OS terminal window/tab that hosts this session to the front.
