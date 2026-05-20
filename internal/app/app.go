@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"clichat/internal/agent"
-	"clichat/internal/hostclient"
-	"clichat/internal/mirror"
-	"clichat/internal/provider"
+	"github.com/luisdemarchi/CLIchat/internal/agent"
+	"github.com/luisdemarchi/CLIchat/internal/hostclient"
+	"github.com/luisdemarchi/CLIchat/internal/mirror"
+	"github.com/luisdemarchi/CLIchat/internal/provider"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -40,29 +39,29 @@ type App struct {
 type Provider = provider.Provider
 
 type Session struct {
-	ID                string                `json:"id"`
-	Title             string                `json:"title"`
-	Topic             string                `json:"topic,omitempty"`
-	ProviderID        string                `json:"providerId"`
-	ProviderTag       string                `json:"providerTag"`
-	ProviderAccent    string                `json:"providerAccent"`
-	Origin            agent.Origin          `json:"origin"`
-	Status            agent.Status          `json:"status"`
-	CWD               string                `json:"cwd,omitempty"`
-	AvatarLabel       string                `json:"avatarLabel"`
-	LastMessage       string                `json:"lastMessage"`
-	CurrentTool       string                `json:"currentTool,omitempty"`
-	ProcessID         int                   `json:"processId,omitempty"`
-	TTY               string                `json:"tty,omitempty"`
-	ClaudeSessionID   string                `json:"claudeSessionId,omitempty"`
-	ExternalAttach    string                `json:"externalAttach"`
-	CreatedAt         string                `json:"createdAt"`
-	UpdatedAt         string                `json:"updatedAt"`
-	Messages          []agent.Message       `json:"messages"`
-	PendingQuestion   string                `json:"pendingQuestion,omitempty"`
-	PendingActions    []agent.PendingAction `json:"pendingActions"`
-	TerminalAttached  bool                  `json:"terminalAttached"`
-	TranscriptPath    string                `json:"transcriptPath,omitempty"`
+	ID               string                `json:"id"`
+	Title            string                `json:"title"`
+	Topic            string                `json:"topic,omitempty"`
+	ProviderID       string                `json:"providerId"`
+	ProviderTag      string                `json:"providerTag"`
+	ProviderAccent   string                `json:"providerAccent"`
+	Origin           agent.Origin          `json:"origin"`
+	Status           agent.Status          `json:"status"`
+	CWD              string                `json:"cwd,omitempty"`
+	AvatarLabel      string                `json:"avatarLabel"`
+	LastMessage      string                `json:"lastMessage"`
+	CurrentTool      string                `json:"currentTool,omitempty"`
+	ProcessID        int                   `json:"processId,omitempty"`
+	TTY              string                `json:"tty,omitempty"`
+	ClaudeSessionID  string                `json:"claudeSessionId,omitempty"`
+	ExternalAttach   string                `json:"externalAttach"`
+	CreatedAt        string                `json:"createdAt"`
+	UpdatedAt        string                `json:"updatedAt"`
+	Messages         []agent.Message       `json:"messages"`
+	PendingQuestion  string                `json:"pendingQuestion,omitempty"`
+	PendingActions   []agent.PendingAction `json:"pendingActions"`
+	TerminalAttached bool                  `json:"terminalAttached"`
+	TranscriptPath   string                `json:"transcriptPath,omitempty"`
 }
 
 type Bootstrap struct {
@@ -85,6 +84,11 @@ type SendInput struct {
 
 type TerminalInput struct {
 	SessionID string `json:"sessionId"`
+}
+
+type OpenSessionTerminalInput struct {
+	SessionID  string `json:"sessionId"`
+	ProviderID string `json:"providerId,omitempty"`
 }
 
 type TerminalActionInput struct {
@@ -142,106 +146,10 @@ func (a *App) bootstrapLoop() {
 		}
 		a.mu.Unlock()
 		a.subscribeInternalSessions()
-		a.tryAutoReconnect()
 	}
 
 	a.emitState()
 	a.startStateStream()
-}
-
-// tryAutoReconnect re-spawns PTYs for internal instances that were marked
-// offline at boot (daemon restarted, or app reopened after closing). For
-// Claude it adds `--resume <claudeSessionId>` so the conversation context is
-// preserved; for Codex it uses `codex resume --last`. Gemini falls back to a
-// fresh session because it has no documented resume flag.
-func (a *App) tryAutoReconnect() {
-	a.mu.RLock()
-	var candidates []agent.Instance
-	for _, inst := range a.instances {
-		if inst.Origin == agent.OriginInternal && !inst.TerminalAttached {
-			candidates = append(candidates, inst)
-		}
-	}
-	a.mu.RUnlock()
-	for _, inst := range candidates {
-		instCopy := inst
-		go a.reconnectInstance(instCopy)
-	}
-}
-
-func (a *App) reconnectInstance(inst agent.Instance) {
-	prov, ok := a.providerByID(provider.ID(inst.ProviderID))
-	if !ok || !prov.Available {
-		return
-	}
-	command := prov.Command
-	args := append([]string{}, prov.Args...)
-	switch inst.ProviderID {
-	case "claude":
-		if inst.ClaudeSessionID != "" {
-			args = append([]string{"--resume", inst.ClaudeSessionID}, args...)
-		}
-		args = append(args, claudeAgentChatArgs(inst.ID, prov)...)
-	case "codex":
-		// `codex resume --last` reattaches to the most recent rollout. Falls back
-		// gracefully to a fresh interactive session if no rollout exists.
-		args = append([]string{"resume", "--last"}, args...)
-	case "gemini":
-		// No resume flag — restart with the original interactive command.
-	}
-	env := []string{
-		"AGENT_CHAT_INTERNAL_SESSION_ID=" + inst.ID,
-		"AGENT_CHAT_HOST=" + a.host.BaseURL(),
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if _, err := a.host.StartTerminal(ctx, inst.ID, hostclient.StartTerminalInput{
-		Command: command,
-		Args:    args,
-		CWD:     inst.CWD,
-		Env:     env,
-	}); err != nil {
-		log.Printf("reconnect-failed instance=%s provider=%s args=%v err=%v",
-			shortID(inst.ID), inst.ProviderID, args, err)
-		// Retry fresh when resume hint failed:
-		//   codex resume --last → no rollout available
-		//   claude --resume <id> → session UUID gone
-		var freshArgs []string
-		switch inst.ProviderID {
-		case "codex":
-			if len(args) >= 2 && args[0] == "resume" && args[1] == "--last" {
-				freshArgs = append([]string{}, prov.Args...)
-			}
-		case "claude":
-			if len(args) >= 2 && args[0] == "--resume" {
-				freshArgs = append([]string{}, prov.Args...)
-				freshArgs = append(freshArgs, claudeAgentChatArgs(inst.ID, prov)...)
-			}
-		}
-		if freshArgs != nil {
-			log.Printf("reconnect-retry-fresh instance=%s provider=%s args=%v", shortID(inst.ID), inst.ProviderID, freshArgs)
-			if _, err2 := a.host.StartTerminal(ctx, inst.ID, hostclient.StartTerminalInput{
-				Command: command,
-				Args:    freshArgs,
-				CWD:     inst.CWD,
-				Env:     env,
-			}); err2 != nil {
-				log.Printf("reconnect-retry-failed instance=%s err=%v", shortID(inst.ID), err2)
-				return
-			}
-			a.subscribeOutput(inst.ID)
-		}
-		return
-	}
-	log.Printf("reconnect-ok instance=%s provider=%s", shortID(inst.ID), inst.ProviderID)
-	a.subscribeOutput(inst.ID)
-}
-
-func shortID(id string) string {
-	if len(id) >= 8 {
-		return id[:8]
-	}
-	return id
 }
 
 func (a *App) startStateStream() {
@@ -373,6 +281,12 @@ func (a *App) subscribeOutput(id string) {
 	}()
 }
 
+func (a *App) forgetOutputSubscription(id string) {
+	a.subMu.Lock()
+	delete(a.subscribed, id)
+	a.subMu.Unlock()
+}
+
 // ---------------------------------------------------------------------------
 // Wails-bound API
 // ---------------------------------------------------------------------------
@@ -389,28 +303,14 @@ func (a *App) ListSessions() []Session {
 	return a.sessions()
 }
 
-// ReconnectSession respawns the underlying CLI for a session whose PTY died
-// (daemon was restarted, user closed app, or the CLI exited). Idempotent —
-// returns nil if already attached. Used by the frontend when the user clicks
-// on an offline chat row.
+// ReconnectSession is kept for older frontends. It now opens a fresh terminal
+// with the chat handoff instead of resuming a provider-specific global session.
 func (a *App) ReconnectSession(id string) error {
 	if strings.TrimSpace(id) == "" {
 		return errors.New("session id is required")
 	}
-	a.mu.RLock()
-	inst, ok := a.instances[id]
-	a.mu.RUnlock()
-	if !ok {
-		return errors.New("session not found")
-	}
-	if inst.Origin != agent.OriginInternal {
-		return nil
-	}
-	if inst.TerminalAttached {
-		return nil
-	}
-	go a.reconnectInstance(inst)
-	return nil
+	_, err := a.OpenSessionTerminal(OpenSessionTerminalInput{SessionID: id})
+	return err
 }
 
 func (a *App) DeleteSession(id string) error {
@@ -455,7 +355,7 @@ func (a *App) CreateChat(input CreateInput) (Session, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := a.host.Health(ctx); err != nil {
-		return Session{}, errors.New("clichat-host offline. Rode: clichat-host serve")
+		return Session{}, errors.New("clichat-host is offline. Run: clichat-host serve")
 	}
 
 	inst, err := a.host.CreateInstance(ctx, hostclient.CreateInstanceInput{
@@ -471,6 +371,9 @@ func (a *App) CreateChat(input CreateInput) (Session, error) {
 	args := append([]string{}, prov.Args...)
 	if prov.ID == provider.Claude {
 		args = append(args, claudeAgentChatArgs(inst.ID, prov)...)
+	}
+	if prov.ID == provider.Gemini {
+		args = geminiArgs(inst, args, false)
 	}
 	env := []string{
 		"AGENT_CHAT_INTERNAL_SESSION_ID=" + inst.ID,
@@ -493,6 +396,95 @@ func (a *App) CreateChat(input CreateInput) (Session, error) {
 	a.subscribeOutput(updated.ID)
 	a.emitState()
 	return a.toSession(updated), nil
+}
+
+func (a *App) OpenSessionTerminal(input OpenSessionTerminalInput) (Session, error) {
+	id := strings.TrimSpace(input.SessionID)
+	if id == "" {
+		return Session{}, errors.New("session id is required")
+	}
+
+	a.mu.RLock()
+	inst, ok := a.instances[id]
+	a.mu.RUnlock()
+	if !ok {
+		return Session{}, errors.New("session not found")
+	}
+	if inst.Origin != agent.OriginInternal {
+		return a.toSession(inst), errors.New("external sessions are read-only")
+	}
+
+	providerID := strings.TrimSpace(input.ProviderID)
+	if providerID == "" {
+		providerID = inst.ProviderID
+	}
+	prov, ok := a.providerByID(provider.ID(providerID))
+	if !ok {
+		return a.toSession(inst), fmt.Errorf("unknown provider: %s", providerID)
+	}
+	if !prov.Available {
+		return a.toSession(inst), fmt.Errorf("%s CLI not found", prov.Name)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if err := a.host.Health(ctx); err != nil {
+		return a.toSession(inst), errors.New("clichat-host is offline. Run: clichat-host serve")
+	}
+
+	_, _ = a.host.StopTerminal(ctx, inst.ID)
+	a.forgetOutputSubscription(inst.ID)
+
+	if inst.ProviderID != providerID {
+		updated, err := a.host.SetProvider(ctx, inst.ID, providerID)
+		if err != nil {
+			return a.toSession(inst), err
+		}
+		inst = updated
+	}
+	memory, _ := a.host.ConversationMemory(ctx, inst.ID)
+
+	args := freshProviderArgs(inst, prov)
+	env := []string{
+		"AGENT_CHAT_INTERNAL_SESSION_ID=" + inst.ID,
+		"AGENT_CHAT_HOST=" + a.host.BaseURL(),
+	}
+	started, err := a.host.StartTerminal(ctx, inst.ID, hostclient.StartTerminalInput{
+		Command: prov.Command,
+		Args:    args,
+		CWD:     inst.CWD,
+		Env:     env,
+	})
+	if err != nil {
+		return a.toSession(inst), err
+	}
+
+	a.mu.Lock()
+	a.instances[started.ID] = started
+	a.selected = started.ID
+	a.mu.Unlock()
+	a.subscribeOutput(started.ID)
+
+	handoff := conversationHandoffPrompt(started, prov, memory)
+	if handoff != "" {
+		_, _ = a.host.AppendMessage(ctx, started.ID, agent.RoleSystem,
+			fmt.Sprintf("Terminal %s started with the chat memory.", prov.Name))
+		_, _ = a.host.SetStatus(ctx, started.ID, agent.StatusBusy, "")
+		if err := a.host.SendText(ctx, started.ID, handoff); err != nil {
+			_, _ = a.host.SetStatus(ctx, started.ID, agent.StatusWaiting, "")
+			return a.toSession(started), err
+		}
+	}
+
+	if fresh, err := a.host.GetInstance(ctx, started.ID); err == nil {
+		a.mu.Lock()
+		a.instances[fresh.ID] = fresh
+		a.mu.Unlock()
+		a.emitState()
+		return a.toSession(fresh), nil
+	}
+	a.emitState()
+	return a.toSession(started), nil
 }
 
 // FocusTerminal brings the OS terminal window/tab that hosts this session to the front.
@@ -557,7 +549,7 @@ func (a *App) PickFiles() ([]string, error) {
 		return nil, errors.New("wails context unavailable")
 	}
 	paths, err := wailsruntime.OpenMultipleFilesDialog(a.ctx, wailsruntime.OpenDialogOptions{
-		Title: "Anexar arquivos",
+		Title: "Attach files",
 	})
 	if err != nil {
 		return nil, err
@@ -587,10 +579,10 @@ func (a *App) SendFiles(input SendFilesInput) (Session, error) {
 		return Session{}, errors.New("session not found")
 	}
 	if inst.Origin != agent.OriginInternal {
-		return a.toSession(inst), errors.New("anexar arquivo so funciona em sessoes internas")
+		return a.toSession(inst), errors.New("file attachment only works for internal sessions")
 	}
 
-	bubble := "📎 Anexando " + pluralFiles(len(paths)) + ":\n"
+	bubble := "Attaching " + pluralFiles(len(paths)) + ":\n"
 	for _, p := range paths {
 		bubble += "- " + p + "\n"
 	}
@@ -626,9 +618,9 @@ func (a *App) SendFiles(input SendFilesInput) (Session, error) {
 
 func pluralFiles(n int) string {
 	if n == 1 {
-		return "1 arquivo"
+		return "1 file"
 	}
-	return fmt.Sprintf("%d arquivos", n)
+	return fmt.Sprintf("%d files", n)
 }
 
 func (a *App) RespondToPrompt(input TerminalActionInput) (Session, error) {
@@ -639,7 +631,7 @@ func (a *App) RespondToPrompt(input TerminalActionInput) (Session, error) {
 		return Session{}, errors.New("session not found")
 	}
 	if len(inst.PendingActions) == 0 {
-		return a.toSession(inst), errors.New("nenhuma acao pendente")
+		return a.toSession(inst), errors.New("no pending action")
 	}
 	value := input.Input
 	for _, action := range inst.PendingActions {
@@ -703,7 +695,7 @@ func (a *App) OpenTerminal(input TerminalInput) (string, error) {
 	}
 	command := externalAttachCommand(inst)
 	if command == "" {
-		return "", errors.New("comando de attach indisponivel")
+		return "", errors.New("attach command unavailable")
 	}
 	if a.ctx != nil {
 		wailsruntime.ClipboardSetText(a.ctx, command)
@@ -730,7 +722,7 @@ func (a *App) MirrorStatus() mirror.Status {
 			Enabled: false,
 			Mode:    "host-offline",
 			Address: hostclient.DefaultHTTPAddress,
-			Note:    "clichat-host offline. Rode: clichat-host serve",
+			Note:    "clichat-host is offline. Run: clichat-host serve",
 		}
 	}
 	return mirror.Status{
@@ -809,7 +801,7 @@ func (a *App) toSession(inst agent.Instance) Session {
 		last = inst.Messages[len(inst.Messages)-1].Text
 	}
 	if last == "" && inst.Origin == agent.OriginExternal {
-		last = "Sessao externa detectada. Aguardando primeira resposta."
+		last = "External session detected. Waiting for the first reply."
 	}
 
 	return Session{
@@ -877,9 +869,143 @@ func claudeAgentChatArgs(sessionID string, _ provider.Provider) []string {
 	}
 }
 
+func freshProviderArgs(inst agent.Instance, prov provider.Provider) []string {
+	args := append([]string{}, prov.Args...)
+	switch prov.ID {
+	case provider.Claude:
+		args = append(args, claudeAgentChatArgs(inst.ID, prov)...)
+	case provider.Gemini:
+		args = geminiArgs(inst, args, false)
+	}
+	return args
+}
+
+func conversationHandoffPrompt(inst agent.Instance, prov provider.Provider, memory hostclient.ConversationMemory) string {
+	summary := strings.TrimSpace(memory.Summary)
+	if summary == "" {
+		messages := nonSystemMessages(inst.Messages)
+		if len(messages) == 0 {
+			return ""
+		}
+		summary = summarizeMessages(messages, 12000)
+	}
+	if strings.TrimSpace(summary) == "" {
+		return ""
+	}
+	topic := strings.TrimSpace(firstNonEmpty(memory.Topic, inst.Topic, inst.Title))
+	var b strings.Builder
+	b.WriteString("You are taking over an existing CLIchat conversation.\n")
+	b.WriteString("This is the same chat; only the terminal/agent changed to ")
+	b.WriteString(prov.Name)
+	b.WriteString(".\n\n")
+	if topic != "" {
+		b.WriteString("Current chat topic: ")
+		b.WriteString(topic)
+		b.WriteString(".\n\n")
+	}
+	b.WriteString("Use the summary below as startup context. Do not repeat the summary to the user. ")
+	b.WriteString("Reply only with a short sentence saying you have taken over the conversation and wait for the next instruction, unless there is a clear pending request.\n\n")
+	b.WriteString("Internal memory for this conversation:\n")
+	b.WriteString(summary)
+	return b.String()
+}
+
+func nonSystemMessages(messages []agent.Message) []agent.Message {
+	out := make([]agent.Message, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == agent.RoleSystem {
+			continue
+		}
+		if strings.TrimSpace(msg.Text) == "" {
+			continue
+		}
+		out = append(out, msg)
+	}
+	return out
+}
+
+func summarizeMessages(messages []agent.Message, maxChars int) string {
+	if maxChars <= 0 {
+		maxChars = 12000
+	}
+	var lines []string
+	total := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		text := compactForHandoff(msg.Text)
+		if text == "" {
+			continue
+		}
+		line := fmt.Sprintf("- %s: %s", roleLabel(msg.Role), text)
+		if total+len(line) > maxChars {
+			break
+		}
+		lines = append([]string{line}, lines...)
+		total += len(line)
+	}
+	if len(lines) == 0 {
+		return "- No usable recent messages."
+	}
+	return strings.Join(lines, "\n")
+}
+
+func compactForHandoff(text string) string {
+	text = strings.TrimSpace(text)
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > 900 {
+		text = text[:900] + "..."
+	}
+	return text
+}
+
+func roleLabel(role agent.Role) string {
+	switch role {
+	case agent.RoleUser:
+		return "User"
+	case agent.RoleAssistant:
+		return "Assistant"
+	default:
+		return "System"
+	}
+}
+
+func geminiArgs(inst agent.Instance, base []string, resume bool) []string {
+	sessionID := firstNonEmpty(inst.ProviderSessionID, instanceUUID(inst.ID))
+	if sessionID == "" {
+		return base
+	}
+	args := append([]string{}, base...)
+	if resume {
+		return append(args, "--resume", sessionID)
+	}
+	return append(args, "--session-id", sessionID)
+}
+
+func instanceUUID(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if len(id) != 32 {
+		return id
+	}
+	for _, r := range id {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return id
+		}
+	}
+	return id[0:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:32]
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func externalAttachCommand(inst agent.Instance) string {
 	if inst.Origin == agent.OriginInternal {
-		return "agentctl attach " + inst.ID
+		return "clichat attach " + inst.ID
 	}
 	if inst.PID != 0 {
 		return fmt.Sprintf("ps -p %d", inst.PID)
@@ -926,7 +1052,7 @@ func openExternalTerminal(command string) error {
 	case "windows":
 		return exec.Command("cmd", "/c", "start", "cmd", "/k", command).Start()
 	default:
-		return errors.New("abrir terminal externo nao suportado neste sistema")
+		return errors.New("opening an external terminal is not supported on this system")
 	}
 }
 
@@ -935,7 +1061,7 @@ func openExternalTerminal(command string) error {
 // the window stays open after Claude exits.
 func openTerminalRunning(command string, cwd string) error {
 	if command == "" {
-		return errors.New("comando vazio")
+		return errors.New("empty command")
 	}
 	full := command
 	if strings.TrimSpace(cwd) != "" {
@@ -988,9 +1114,9 @@ end tell`
 		}
 		return exec.Command("osascript", "-e", script).Run()
 	case "linux", "windows":
-		return errors.New("focar terminal externo ainda nao suportado neste sistema")
+		return errors.New("focusing an external terminal is not supported on this system yet")
 	default:
-		return errors.New("plataforma nao suportada")
+		return errors.New("unsupported platform")
 	}
 }
 
@@ -1006,7 +1132,7 @@ func escapeAppleScript(text string) string {
 // (e.g. SIP/sandbox), in which case the Terminal window may steal focus once.
 func sendToExternalTerminal(tty string, text string) error {
 	if strings.TrimSpace(tty) == "" {
-		return errors.New("sessao sem tty conhecido — abra/foque o terminal antes")
+		return errors.New("session has no known tty; open or focus the terminal first")
 	}
 	if err := injectIntoTTY(tty, text); err == nil {
 		return nil
@@ -1015,7 +1141,7 @@ func sendToExternalTerminal(tty string, text string) error {
 		_ = err
 	}
 	if runtime.GOOS != "darwin" {
-		return errors.New("envio para terminal externo nao suportado neste sistema")
+		return errors.New("sending to an external terminal is not supported on this system")
 	}
 
 	short := strings.TrimPrefix(tty, "/dev/")
@@ -1047,18 +1173,18 @@ tell application "System Events"
 }
 
 func openMacTerminal(command string) error {
-	agentctl := "agentctl"
-	if path, err := exec.LookPath("agentctl"); err == nil {
-		agentctl = path
+	clichat := "clichat"
+	if path, err := exec.LookPath("clichat"); err == nil {
+		clichat = path
 	} else if home, err := os.UserHomeDir(); err == nil {
-		candidate := filepath.Join(home, ".local", "bin", "agentctl")
+		candidate := filepath.Join(home, ".local", "bin", "clichat")
 		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-			agentctl = candidate
+			clichat = candidate
 		}
 	}
 	parts := strings.Fields(command)
-	if len(parts) >= 3 && parts[0] == "agentctl" && parts[1] == "attach" {
-		command = shellQuote(agentctl) + " attach " + shellQuote(parts[2])
+	if len(parts) >= 3 && parts[0] == "clichat" && parts[1] == "attach" {
+		command = shellQuote(clichat) + " attach " + shellQuote(parts[2])
 	}
 
 	file, err := os.CreateTemp("", "agent-chat-*.command")

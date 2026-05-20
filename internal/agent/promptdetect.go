@@ -128,6 +128,9 @@ func DetectPrompt(buffer string) (string, []PendingAction, bool) {
 		"trust the authors",
 		"do you want to proceed",
 		"do you want to continue",
+		"do you want to allow",
+		"allow this command",
+		"approve this",
 		"are you sure",
 		"continue?",
 		"proceed?",
@@ -139,8 +142,22 @@ func DetectPrompt(buffer string) (string, []PendingAction, bool) {
 	for _, trigger := range yesNoTriggers {
 		if strings.Contains(lower, trigger) {
 			return promptQuestionFromBuffer(buffer), []PendingAction{
-				{ID: "yes", Label: "Sim", Input: "y"},
-				{ID: "no", Label: "Nao", Input: "n"},
+				{ID: "yes", Label: "Yes", Input: "y"},
+				{ID: "no", Label: "No", Input: "n"},
+			}, true
+		}
+	}
+	continueTriggers := []string{
+		"press enter to continue",
+		"pressione enter para continuar",
+		"aperte enter para continuar",
+		"hit enter to continue",
+		"return to continue",
+	}
+	for _, trigger := range continueTriggers {
+		if strings.Contains(lower, trigger) {
+			return promptQuestionFromBuffer(buffer), []PendingAction{
+				{ID: "continue", Label: "Continuar", Input: ""},
 			}, true
 		}
 	}
@@ -167,7 +184,7 @@ func promptQuestionFromBuffer(buffer string) string {
 	}
 	question := strings.Join(kept, " ")
 	if question == "" {
-		question = "O CLI esta aguardando uma escolha."
+		question = "The CLI is waiting for a choice."
 	}
 	if len(question) > 280 {
 		question = question[:280] + "…"

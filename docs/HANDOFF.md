@@ -13,7 +13,7 @@ App desktop (macOS-first) estilo WhatsApp Web pra leigo conversar com Claude Cod
 
 ```
 ┌─────────────────┐  HTTP/SSE  ┌─────────────────────┐
-│ AgentChatLocal  │ ─────────▶ │      clichat-host     │
+│    CLIchat      │ ─────────▶ │      clichat-host     │
 │ (Wails desktop) │            │    daemon Go puro   │
 └─────────────────┘            │  • PTY manager      │
                                │  • SSE state stream │
@@ -21,25 +21,29 @@ App desktop (macOS-first) estilo WhatsApp Web pra leigo conversar com Claude Cod
                                │  • prompt detector  │
                                │  • JSONL watcher    │
                                │  • JSON state file  │
+                               │  • SQLite memory    │
                                └──────────┬──────────┘
                                           ▲
-                            agentctl hook session-start|...
+                            clichat hook session-start|...
 ```
 
-- `clichat-host` em `127.0.0.1:47657` (HTTP) + `:47656` (TCP attach). Persiste em `~/.clichat/state.json`.
-- `agentctl` CLI: `attach <id>`, `hook *`, `install-hooks`, `uninstall-hooks`, `list`, `register`.
+- `clichat-host` em `127.0.0.1:47657` (HTTP) + `:47656` (TCP attach). Persiste em `~/.clichat/state.json` e indexa memoria por chat em `~/.clichat/memory.sqlite3`.
+- `clichat` CLI: `attach <id>`, `hook *`, `install-hooks`, `uninstall-hooks`, `list`, `register`.
 - Wails app: thin client; consome `/v1/state/events` SSE.
 
 ## Principais arquivos
 ```
 clichat/
 ├── cmd/clichat-host/main.go           # daemon HTTP + MCP + endpoints REST
-├── cmd/agentctl/main.go             # CLI hooks + install
+├── cmd/clichat/main.go               # installer, hooks, status, attach
 ├── cmd/agent-test/main.go           # E2E smoke test
 ├── internal/agent/
 │   ├── store.go                     # registry persistente JSON
+│   ├── topic.go                     # titulo/topico local por intencao
 │   ├── transcript.go                # JSONL discovery + watcher
 │   └── promptdetect.go              # detect numbered/yes-no menus do TUI
+├── internal/memory/
+│   └── store.go                     # SQLite/FTS5: resumo, busca e topicos por chat
 ├── internal/terminal/
 │   ├── manager.go                   # PTY manager
 │   └── process_unix.go              # PTY + SendLine (universal submit)
@@ -59,6 +63,8 @@ clichat/
 3. **Botões de Confirmação (WhatsApp Style)** — Corrigido bug onde bolhas do assistente limpavam botões pendentes. Agora os botões ficam ativos até a resposta do usuário.
 4. **Auto-Link de Transcritos** — Transcritos externos são automaticamente vinculados a instâncias internas se o CWD ou o provedor baterem, evitando duplicidade.
 5. **Submit Universal Robusto** — `SendLine` otimizado: `\x1b[I` (Focus-In) apenas para Claude; `\r\n` e delays de 300ms para Gemini/Codex garantem que o comando "entre" no CLI.
+6. **Memoria por chat + handoff** — cada instance sincroniza mensagens, resumo, topico atual e indice FTS em `~/.clichat/memory.sqlite3`. Ao abrir um terminal novo ou transferir provider, o prompt inicial recebe somente a memoria daquele chat.
+7. **Titulo inteligente** — o daemon atualiza o nome visivel pelo assunto mais recente do usuario e aceita refinamento via MCP `agent_chat_set_topic`.
 
 ## Testes Realizados
 - **E2E Test Suite (`agent-test`)**: Todos os 3 provedores (Claude, Gemini, Codex) passam 5/5.
@@ -81,7 +87,7 @@ clichat/
    Solução copiada de `github.com/johannesjo/parallel-code/electron/ipc/pty.ts`. Antes de descobrir, tentei provider-specific (claude=plain, codex=bracketed paste, gemini=delayed plain) — funcionava 4/5 pro Claude e quebrava Gemini. Universal funciona 3/3 e 5/5 nos meus runs.
 3. **Wait-for-ready** — `Process.readyCh` fecha no primeiro chunk de output; `SendLine` aguarda até 10s + 1.5s grace antes de escrever, evitando perder input enquanto TUI ainda inicializa.
 4. **Discovery global** via `~/.claude/projects/*/*.jsonl` — sessões Claude rodando em qualquer terminal aparecem.
-5. **Hooks Claude** (`SessionStart`, `Stop`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`) instalados em `~/.claude/settings.json` por `agentctl install-hooks` — atualizam status/tool em tempo real.
+5. **Hooks Claude** (`SessionStart`, `Stop`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`) instalados em `~/.claude/settings.json` por `clichat install-hooks` — atualizam status/tool em tempo real.
 6. **MCP HTTP** em `/mcp` com tools `agent_chat_register`, `agent_chat_reply`, `agent_chat_question` — **mas atualmente desabilitado pra Claude** (sem `--mcp-config`) por causar "MCP server failed" race intermitente. Bolhas chegam via JSONL transcript watcher.
 7. **Persistência** — JSON file (`~/.clichat/state.json`); restart preserva tudo.
 8. **Dedup mensagens** (last 30 messages) — evita user+JSONL duplicar bolha.
@@ -107,7 +113,7 @@ E2E (`/tmp/agent-test`) bate path **idêntico** ao Wails app (`POST /v1/instance
 - POST start-terminal cada
 - SSE subscribe `/v1/instances/{id}/events`
 - collect boot 6s
-- auto-dismiss pending prompt (`agentctl /v1/instances/{id} → pendingActions` → POST /send "1")
+- auto-dismiss pending prompt (`GET /v1/state` → pendingActions → `POST /send "1"`)
 - POST /send "oi"
 - collect até 30s ou detectar resposta real
 - heurística `hasRealReply()` — busca "thinking", "responding", "que tarefa", "olá" etc
@@ -126,17 +132,17 @@ cd /Users/luis/projetos/pessoal/clichat
 
 # build
 go build -o ~/.local/bin/clichat-host ./cmd/clichat-host
-go build -o ~/.local/bin/agentctl ./cmd/agentctl
+go build -o ~/.local/bin/clichat ./cmd/clichat
 ~/go/bin/wails build -clean
 
 # instala hooks
-~/.local/bin/agentctl install-hooks
+~/.local/bin/clichat install-hooks
 
 # daemon (pode rodar via launchd ~/Library/LaunchAgents/com.clichat.host.plist)
 nohup ~/.local/bin/clichat-host serve > ~/.clichat/logs/host.out.log 2>&1 &
 
 # app
-open -a /Users/luis/projetos/pessoal/clichat/build/bin/clichat.app
+open -a /Users/luis/projetos/pessoal/CLIchat/build/bin/CLIchat.app
 
 # test
 go build -o /tmp/agent-test ./cmd/agent-test
@@ -146,9 +152,10 @@ go build -o /tmp/agent-test ./cmd/agent-test
 ## Estado dos processos
 ```
 clichat-host PID dinâmico em 127.0.0.1:47657
-AgentChatLocal.app PID dinâmico
+CLIchat.app PID dinâmico
 state em ~/.clichat/state.json
-hooks em ~/.claude/settings.json (5 entries `_managedBy: agentctl-managed`)
+memory em ~/.clichat/memory.sqlite3
+hooks em ~/.claude/settings.json (5 entries `_managedBy: clichat-managed`)
 ```
 
 ## Pesquisa GitHub feita

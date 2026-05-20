@@ -1,6 +1,6 @@
 /*
  * Visual baseado em WhatsApp Web (web.whatsapp.com).
- * Cores oficiais aproximadas; layout/espaçamento fiel ao clone visual padrão.
+ * Approximate official colors; spacing follows the baseline visual clone.
  */
 
 :root,
@@ -713,7 +713,7 @@ select {
   margin-top: 8px;
 }
 
-/* Tail aparece só na primeira bolha consecutiva (estilo whatsapp). */
+/* Tail appears only on the first consecutive bubble. */
 .bubble.first.assistant::before {
   content: '';
   position: absolute;
@@ -941,6 +941,62 @@ select {
 
 .status-pill .status-emoji {
   font-size: 14px;
+}
+
+.terminal-recovery {
+  align-self: center;
+  display: grid;
+  gap: 12px;
+  width: min(640px, 92%);
+  padding: 14px 16px;
+  border-radius: 8px;
+  background: var(--wa-prompt-card-bg);
+  border: 1px solid rgba(var(--wa-tint-fg), 0.08);
+  box-shadow: 0 1px 2px rgba(var(--wa-tint-fg), 0.1);
+  color: var(--wa-text-primary);
+}
+
+.terminal-recovery strong {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 14px;
+}
+
+.terminal-recovery p {
+  margin: 0;
+  color: var(--wa-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.terminal-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.terminal-recovery-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  border: 1px solid var(--wa-border);
+  border-radius: 7px;
+  padding: 0 11px;
+  background: var(--wa-panel-bg);
+  color: var(--wa-text-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.terminal-recovery-actions button:hover:not(:disabled) {
+  border-color: var(--wa-accent);
+  color: var(--wa-accent);
+}
+
+.terminal-recovery-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .prompt-card {

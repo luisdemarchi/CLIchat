@@ -39,13 +39,13 @@ Enter to confirm · Esc to cancel`
 func TestDetectPromptIgnoresMarkdownNumberedList(t *testing.T) {
 	// Plain numbered list inside a normal assistant answer — no cursor, no
 	// trigger phrase. Must NOT be classified as a menu.
-	buffer := `Resumo das mudanças aplicadas:
+	buffer := `Summary of applied changes:
 
-1. Refatorei o módulo de auth
-2. Adicionei testes
-3. Atualizei a documentação
+1. Refactored the auth module
+2. Added tests
+3. Updated the documentation
 
-Tudo pronto pra revisar.`
+Ready for review.`
 
 	if _, _, ok := DetectPrompt(buffer); ok {
 		t.Fatalf("did not expect menu detection on markdown list")
@@ -80,6 +80,17 @@ func TestDetectPromptYesNoTrustFolder(t *testing.T) {
 	}
 	if actions[0].Input != "y" || actions[1].Input != "n" {
 		t.Errorf("expected y/n inputs, got %q/%q", actions[0].Input, actions[1].Input)
+	}
+}
+
+func TestDetectPromptPressEnterToContinue(t *testing.T) {
+	buffer := `Operation completed. Press Enter to continue.`
+	_, actions, ok := DetectPrompt(buffer)
+	if !ok {
+		t.Fatalf("expected continue detection")
+	}
+	if len(actions) != 1 || actions[0].Input != "" {
+		t.Fatalf("expected single empty-input continue action, got %+v", actions)
 	}
 }
 

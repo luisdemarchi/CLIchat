@@ -1,4 +1,18 @@
-import { MessageSquarePlus, Moon, Paperclip, Search, Send, Square, Sun, TerminalSquare, Trash2, ZoomIn, ZoomOut } from 'lucide-react';
+import {
+  ArrowRightLeft,
+  MessageSquarePlus,
+  Moon,
+  Paperclip,
+  Play,
+  Search,
+  Send,
+  Square,
+  Sun,
+  TerminalSquare,
+  Trash2,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
 import React, { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -7,8 +21,8 @@ import {
   deleteSession,
   getBootstrap,
   onStateUpdate,
+  openSessionTerminal,
   pickFiles,
-  reconnectSession,
   respondToPrompt,
   selectSession,
   sendFiles,
@@ -130,6 +144,7 @@ export function App() {
   const [error, setError] = useState('');
   const [terminalOpen, setTerminalOpen] = useState(true);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
   const [lastSeen, setLastSeen] = useState<Record<string, number>>(() => readLastSeen());
   const [theme, setTheme] = useState<'light' | 'dark'>(
     () => (document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'),
@@ -224,8 +239,8 @@ export function App() {
   );
   const SelectedIcon = selectedStatus.Icon;
 
-  // CLIs aceitam input concorrente — não bloquear durante busy. Só desabilitar
-  // quando o terminal não está realmente conectado (offline / não respawnado).
+  // CLIs accept concurrent input; only disable the composer when the terminal
+  // is not actually connected.
   const canSend = Boolean(selected && selected.terminalAttached && selected.status !== 'offline');
 
   const messagesRef = useRef<HTMLDivElement | null>(null);
@@ -266,13 +281,6 @@ export function App() {
     } catch {
       // optimistic
     }
-    if (!session.terminalAttached || session.status === 'offline') {
-      try {
-        await reconnectSession(session.id);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    }
   }
 
   async function handleNewChat(provider: { id: ProviderId; name: string }) {
@@ -291,11 +299,24 @@ export function App() {
     }
   }
 
+  async function handleOpenSessionTerminal(providerId?: ProviderId) {
+    if (!selected) return;
+    setError('');
+    setTransferOpen(false);
+    try {
+      const updated = await openSessionTerminal({ sessionId: selected.id, providerId });
+      setSelectedID(updated.id);
+      setTerminalOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!selected || draft.trim() === '') return;
     if (!canSend) {
-      setError('Chat offline — clique no chat na barra lateral para reconectar.');
+      setError('Terminal closed. Open a new terminal to continue this conversation.');
       return;
     }
     const text = draft.trim();
@@ -329,7 +350,7 @@ export function App() {
   }
 
   async function handleDeleteSession(sessionId: string, label: string) {
-    const confirmed = window.confirm(`Encerrar o chat "${label}"? O CLI será fechado.`);
+    const confirmed = window.confirm(`Close chat "${label}"? The CLI process will be stopped.`);
     if (!confirmed) return;
     setError('');
     try {
@@ -342,7 +363,7 @@ export function App() {
   async function handleAttach() {
     if (!selected) return;
     if (!canSend) {
-      setError('Chat offline — clique no chat na barra lateral para reconectar.');
+      setError('Terminal closed. Open a new terminal to continue this conversation.');
       return;
     }
     setError('');
@@ -356,7 +377,7 @@ export function App() {
   }
 
   if (!state) {
-    return <main className="shell loading">Carregando…</main>;
+    return <main className="shell loading">Loading...</main>;
   }
 
   const messages = selected?.messages ?? [];
@@ -377,7 +398,7 @@ export function App() {
               <button
                 className={`icon-btn ${pickerOpen ? 'active' : ''}`}
                 type="button"
-                title="Novo chat"
+                title="New chat"
                 onClick={() => setPickerOpen((v) => !v)}
               >
                 <MessageSquarePlus size={20} />
@@ -390,7 +411,7 @@ export function App() {
                       type="button"
                       role="menuitem"
                       disabled={!p.available}
-                      title={p.available ? p.description : `${p.name} CLI nao encontrado`}
+                      title={p.available ? p.description : `${p.name} CLI not found`}
                       onClick={() => {
                         setPickerOpen(false);
                         void handleNewChat({ id: p.id, name: p.name });
@@ -400,7 +421,7 @@ export function App() {
                         <ProviderLogo providerId={p.id} size={14} />
                       </span>
                       <span className="label">{p.name}</span>
-                      {!p.available ? <span className="hint">indisponivel</span> : null}
+                      {!p.available ? <span className="hint">unavailable</span> : null}
                     </button>
                   ))}
                 </div>
@@ -409,7 +430,7 @@ export function App() {
             <button
               className="icon-btn"
               type="button"
-              title="Diminuir fonte (Cmd -)"
+              title="Decrease font size (Cmd -)"
               disabled={fontLevel === 0}
               onClick={() => setFontLevel((l) => Math.max(0, l - 1))}
             >
@@ -418,7 +439,7 @@ export function App() {
             <button
               className="icon-btn"
               type="button"
-              title="Aumentar fonte (Cmd +)"
+              title="Increase font size (Cmd +)"
               disabled={fontLevel === FONT_LEVELS.length - 1}
               onClick={() => setFontLevel((l) => Math.min(FONT_LEVELS.length - 1, l + 1))}
             >
@@ -427,7 +448,7 @@ export function App() {
             <button
               className="icon-btn"
               type="button"
-              title={theme === 'dark' ? 'Tema claro' : 'Tema escuro'}
+              title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
               onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
             >
               {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
@@ -441,20 +462,19 @@ export function App() {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Pesquisar"
+              placeholder="Search"
             />
           </div>
         </div>
 
         {error ? <div className="error-banner">{error}</div> : null}
 
-        <nav className="chat-list" aria-label="Conversas">
+        <nav className="chat-list" aria-label="Conversations">
           {filteredSessions.length === 0 ? (
             <div className="empty-list">
-              <p>Nenhum chat ainda.</p>
+              <p>No chats yet.</p>
               <small>
-                Clique no ícone de novo chat acima e escolha o provedor para iniciar uma conversa
-                local.
+                Click the new chat icon above and choose a provider to start a local conversation.
               </small>
             </div>
           ) : null}
@@ -468,7 +488,7 @@ export function App() {
               <div className="chat-row-wrap" key={session.id}>
                 <div className="chat-row-bg" aria-hidden="true">
                   <Trash2 size={22} />
-                  <span>encerrar</span>
+                  <span>close</span>
                 </div>
               <button
                 className={`chat-row ${session.id === selected?.id ? 'active' : ''} ${unread > 0 ? 'unread' : ''} ${isSwiping ? 'swiping' : ''}`}
@@ -541,7 +561,7 @@ export function App() {
                       })()}
                     </span>
                     {unread > 0 ? (
-                      <span className="unread-badge" title={`${unread} mensagem${unread === 1 ? '' : 'ns'} não lida${unread === 1 ? '' : 's'}`}>
+                      <span className="unread-badge" title={`${unread} unread message${unread === 1 ? '' : 's'}`}>
                         {unread > 99 ? '99+' : unread}
                       </span>
                     ) : null}
@@ -574,10 +594,55 @@ export function App() {
               </span>
             </div>
             <div className="header-actions">
+              {canSend ? null : (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  title="Open a new terminal with memory"
+                  onClick={() => void handleOpenSessionTerminal(selected.providerId as ProviderId)}
+                >
+                  <Play size={20} />
+                </button>
+              )}
+              <div className="actions-wrap">
+                <button
+                  type="button"
+                  className={`icon-btn ${transferOpen ? 'active' : ''}`}
+                  title="Transfer conversation to another terminal"
+                  onClick={() => setTransferOpen((v) => !v)}
+                >
+                  <ArrowRightLeft size={20} />
+                </button>
+                {transferOpen ? (
+                  <div className="provider-menu transfer-menu" role="menu">
+                    {state.providers.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        role="menuitem"
+                        disabled={!p.available}
+                        title={
+                          p.available
+                            ? `Open ${p.name} in this conversation`
+                            : `${p.name} CLI not found`
+                        }
+                        onClick={() => void handleOpenSessionTerminal(p.id)}
+                      >
+                        <span className="logo" style={{ background: p.accent }}>
+                          <ProviderLogo providerId={p.id} size={14} />
+                        </span>
+                        <span className="label">{p.name}</span>
+                        {p.id === selected.providerId ? <span className="hint">current</span> : null}
+                        {!p.available ? <span className="hint">unavailable</span> : null}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
               <button
                 type="button"
                 className={`icon-btn ${terminalOpen ? 'active' : ''}`}
-                title={terminalOpen ? 'Esconder terminal' : 'Mostrar terminal'}
+                title={terminalOpen ? 'Hide terminal' : 'Show terminal'}
                 onClick={() => setTerminalOpen((v) => !v)}
               >
                 <TerminalSquare size={20} />
@@ -588,7 +653,7 @@ export function App() {
           <div className="messages" ref={messagesRef}>
             {messages.length === 0 ? (
               <article className="bubble system">
-                <p>Sem mensagens ainda. Digite abaixo para começar.</p>
+                <p>No messages yet. Type below to start.</p>
               </article>
             ) : null}
             {messages.map((message, index) => {
@@ -596,10 +661,37 @@ export function App() {
               const isFirstOfRun = !prev || prev.role !== message.role;
               return <MessageBubble key={message.id} message={message} isFirstOfRun={isFirstOfRun} />;
             })}
+            {!canSend ? (
+              <article className="terminal-recovery">
+                <div>
+                  <strong>Terminal disconnected</strong>
+                  <p>Open a new terminal for this conversation. The chat memory will be sent as startup context.</p>
+                </div>
+                <div className="terminal-recovery-actions">
+                  <button type="button" onClick={() => void handleOpenSessionTerminal(selected.providerId as ProviderId)}>
+                    <Play size={15} />
+                    <span>Open {selected.providerTag}</span>
+                  </button>
+                  {state.providers
+                    .filter((p) => p.id !== selected.providerId)
+                    .map((p) => (
+                      <button
+                        type="button"
+                        key={p.id}
+                        disabled={!p.available}
+                        onClick={() => void handleOpenSessionTerminal(p.id)}
+                      >
+                        <ProviderLogo providerId={p.id} size={15} />
+                        <span>Use {p.name}</span>
+                      </button>
+                    ))}
+                </div>
+              </article>
+            ) : null}
             {(selected.pendingActions ?? []).length > 0 ? (
               <article className="prompt-card">
                 <p className="prompt-question">
-                  {selected.pendingQuestion || 'O terminal está aguardando uma escolha.'}
+                  {selected.pendingQuestion || 'The terminal is waiting for a choice.'}
                 </p>
                 <div className="prompt-options">
                   {(selected.pendingActions ?? []).map((action) => {
@@ -622,7 +714,7 @@ export function App() {
                 <button
                   type="button"
                   className={`status-pill clickable ${selectedStatus.spin ? 'spin-icon' : ''} status-${selectedStatus.className ?? ''}`}
-                  title={terminalOpen ? 'Esconder terminal' : 'Mostrar terminal pra ver detalhes'}
+                  title={terminalOpen ? 'Hide terminal' : 'Show terminal details'}
                   onClick={() => setTerminalOpen(true)}
                 >
                   <SelectedIcon size={14} />
@@ -632,8 +724,8 @@ export function App() {
                   <button
                     type="button"
                     className="status-stop"
-                    title="Interromper (ESC)"
-                    aria-label="Interromper"
+                    title="Interrupt (ESC)"
+                    aria-label="Interrupt"
                     onClick={() => void handleInterrupt()}
                   >
                     <Square size={12} fill="currentColor" />
@@ -651,7 +743,7 @@ export function App() {
                 <header>
                   <strong>Terminal · {s.providerTag}</strong>
                   <button type="button" onClick={() => setTerminalOpen(false)}>
-                    Ocultar
+                    Hide
                   </button>
                 </header>
                 <TerminalPane sessionID={s.id} visible={visible} />
@@ -663,7 +755,7 @@ export function App() {
             <button
               type="button"
               className="send-btn"
-              title="Anexar arquivos"
+              title="Attach files"
               onClick={() => void handleAttach()}
               disabled={!canSend}
             >
@@ -672,10 +764,10 @@ export function App() {
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder={canSend ? 'Mensagem' : 'Chat offline — clique no chat para reconectar'}
+              placeholder={canSend ? 'Message' : 'Terminal closed. Open a new terminal above'}
               disabled={!canSend}
             />
-            <button type="submit" className="send-btn" title="Enviar" disabled={!canSend}>
+            <button type="submit" className="send-btn" title="Send" disabled={!canSend}>
               <Send size={20} />
             </button>
           </form>
@@ -686,8 +778,8 @@ export function App() {
             <TerminalSquare size={120} strokeWidth={1} />
             <strong>CLIchat</strong>
             <span>
-              Clique no ícone de novo chat para iniciar uma conversa com Claude, Gemini ou Codex.
-              Cada chat tem seu próprio terminal embutido com a TUI real do CLI.
+              Click the new chat icon to start a conversation with Claude, Gemini, or Codex.
+              Each chat has its own embedded terminal with the real CLI TUI.
             </span>
           </div>
         </section>

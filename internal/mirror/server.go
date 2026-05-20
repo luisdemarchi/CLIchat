@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"clichat/internal/terminal"
+	"github.com/luisdemarchi/CLIchat/internal/terminal"
 )
 
 type Status struct {
@@ -44,7 +44,7 @@ func NewServer(manager *terminal.Manager, output func(sessionID string, data []b
 			Enabled: false,
 			Mode:    "local-disabled",
 			Address: "",
-			Note:    "Attach local ainda nao iniciado.",
+			Note:    "Local attach is not running yet.",
 		},
 	}
 }
@@ -68,7 +68,7 @@ func (s *Server) Start(address string) error {
 		Enabled: true,
 		Mode:    "local-attach",
 		Address: listener.Addr().String(),
-		Note:    "Terminais externos podem usar agentctl run/attach.",
+		Note:    "External terminals can use clichat attach.",
 	}
 	s.mu.Unlock()
 

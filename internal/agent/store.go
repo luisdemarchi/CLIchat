@@ -44,6 +44,7 @@ type Message struct {
 	Role      Role   `json:"role"`
 	Text      string `json:"text"`
 	CreatedAt string `json:"createdAt"`
+	SourceID  string `json:"sourceId,omitempty"`
 }
 
 type PendingAction struct {
@@ -61,8 +62,10 @@ type Instance struct {
 	CWD               string          `json:"cwd"`
 	TTY               string          `json:"tty,omitempty"`
 	PID               int             `json:"pid,omitempty"`
+	ProviderSessionID string          `json:"providerSessionId,omitempty"`
 	ClaudeSessionID   string          `json:"claudeSessionId,omitempty"`
 	TranscriptPath    string          `json:"transcriptPath,omitempty"`
+	TranscriptOffset  int64           `json:"transcriptOffset,omitempty"`
 	Status            Status          `json:"status"`
 	CurrentTool       string          `json:"currentTool,omitempty"`
 	LastMessage       string          `json:"lastMessage,omitempty"`
@@ -270,6 +273,35 @@ func (s *Store) FindByTranscriptPath(path string) (Instance, bool) {
 	return Instance{}, false
 }
 
+func (s *Store) FindByProviderTranscript(providerID string, path string) (Instance, bool) {
+	if path == "" {
+		return Instance{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, inst := range s.instances {
+		if inst.ProviderID == providerID && inst.TranscriptPath == path {
+			return *cloneInstance(inst), true
+		}
+	}
+	return Instance{}, false
+}
+
+func (s *Store) FindByProviderSessionID(providerID string, providerSessionID string) (Instance, bool) {
+	providerSessionID = strings.TrimSpace(providerSessionID)
+	if providerID == "" || providerSessionID == "" {
+		return Instance{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, inst := range s.instances {
+		if inst.ProviderID == providerID && inst.ProviderSessionID == providerSessionID {
+			return *cloneInstance(inst), true
+		}
+	}
+	return Instance{}, false
+}
+
 // FindAwaitingTranscript looks for an internal instance that
 //   - matches `providerID`,
 //   - has no `TranscriptPath` linked yet,
@@ -284,6 +316,8 @@ func (s *Store) FindAwaitingTranscript(providerID string, cwd string, since time
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	var best *Instance
+	var bestDistance time.Duration
 	for _, inst := range s.instances {
 		if inst.Origin != OriginInternal || inst.ProviderID != providerID || inst.TranscriptPath != "" {
 			continue
@@ -294,25 +328,46 @@ func (s *Store) FindAwaitingTranscript(providerID string, cwd string, since time
 		if !cwdMatches(inst.CWD, cwd) {
 			continue
 		}
+		created, err := time.Parse(time.RFC3339Nano, inst.CreatedAt)
 		if !since.IsZero() {
-			created, err := time.Parse(time.RFC3339Nano, inst.CreatedAt)
 			if err == nil && created.Before(since) {
 				continue
 			}
 		}
-		return *cloneInstance(inst), true
+		distance := time.Duration(0)
+		if err == nil && !since.IsZero() {
+			sessionStarted := since.Add(2 * time.Minute)
+			distance = created.Sub(sessionStarted)
+			if distance < 0 {
+				distance = -distance
+			}
+		}
+		if best == nil || distance < bestDistance {
+			best = inst
+			bestDistance = distance
+		}
+	}
+	if best != nil {
+		return *cloneInstance(best), true
 	}
 	return Instance{}, false
 }
 
 func cwdMatches(a, b string) bool {
-	a = strings.TrimRight(a, "/")
-	b = strings.TrimRight(b, "/")
+	a = filepath.Clean(strings.TrimSpace(a))
+	b = filepath.Clean(strings.TrimSpace(b))
 	if a == b {
 		return true
 	}
-	// allow parent/child relationship up to one level (heuristic for symlinks)
-	return strings.HasSuffix(a, "/"+filepath.Base(b)) || strings.HasSuffix(b, "/"+filepath.Base(a))
+	return isDirectChild(a, b) || isDirectChild(b, a)
+}
+
+func isDirectChild(parent string, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return !strings.Contains(rel, string(filepath.Separator))
 }
 
 // UpdateCWD overwrites the CWD on an instance (used after start-terminal so
@@ -340,7 +395,8 @@ func (s *Store) UpdateCWD(id string, cwd string) {
 
 // SetTopic overwrites the short "what am I doing right now" string for an
 // instance. Called by the MCP tool `agent_chat_set_topic`. Topic is shown as
-// the chat name in the sidebar/header.
+// the chat name in the sidebar/header and mirrored into Title so integrations
+// that only read title also see the current subject.
 func (s *Store) SetTopic(id string, topic string) (Instance, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -353,6 +409,9 @@ func (s *Store) SetTopic(id string, topic string) (Instance, bool) {
 		topic = topic[:120]
 	}
 	inst.Topic = topic
+	if topic != "" {
+		inst.Title = topic
+	}
 	inst.UpdatedAt = timestamp()
 	_ = s.persistLocked()
 	clone := *cloneInstance(inst)
@@ -367,7 +426,69 @@ func (s *Store) SetTranscriptPath(id string, path string) (Instance, bool) {
 	if !ok {
 		return Instance{}, false
 	}
+	if inst.TranscriptPath != path {
+		inst.TranscriptOffset = 0
+	}
 	inst.TranscriptPath = path
+	inst.UpdatedAt = timestamp()
+	_ = s.persistLocked()
+	clone := *cloneInstance(inst)
+	s.emitLocked(Event{Kind: EventInstanceUpdated, ID: inst.ID, Payload: clone})
+	return clone, true
+}
+
+func (s *Store) SetTranscriptOffset(id string, path string, offset int64) {
+	if offset < 0 {
+		offset = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inst, ok := s.instances[id]
+	if !ok {
+		return
+	}
+	if path != "" && inst.TranscriptPath != path {
+		return
+	}
+	if inst.TranscriptOffset == offset {
+		return
+	}
+	inst.TranscriptOffset = offset
+	inst.UpdatedAt = timestamp()
+	_ = s.persistLocked()
+	clone := *cloneInstance(inst)
+	s.emitLocked(Event{Kind: EventInstanceUpdated, ID: inst.ID, Payload: clone})
+}
+
+func (s *Store) SetProvider(id string, providerID string) (Instance, bool) {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return Instance{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inst, ok := s.instances[id]
+	if !ok {
+		return Instance{}, false
+	}
+	if inst.ProviderID == providerID {
+		return *cloneInstance(inst), true
+	}
+	inst.ProviderID = providerID
+	inst.ProviderSessionID = ""
+	if providerID == "gemini" {
+		inst.ProviderSessionID = instanceUUID(inst.ID)
+	}
+	inst.ClaudeSessionID = ""
+	inst.TranscriptPath = ""
+	inst.TranscriptOffset = 0
+	inst.CurrentTool = ""
+	inst.PendingQuestion = ""
+	inst.PendingActions = []PendingAction{}
+	inst.TerminalAttached = false
+	inst.Status = StatusOffline
+	inst.PID = 0
+	inst.TTY = ""
 	inst.UpdatedAt = timestamp()
 	_ = s.persistLocked()
 	clone := *cloneInstance(inst)
@@ -383,17 +504,21 @@ type CreateInternalInput struct {
 
 func (s *Store) CreateInternal(input CreateInternalInput) Instance {
 	now := timestamp()
+	id := newID()
 	inst := &Instance{
-		ID:             newID(),
+		ID:             id,
 		ProviderID:     input.ProviderID,
 		Origin:         OriginInternal,
-		Title:          firstNonEmpty(input.Title, fmt.Sprintf("Novo chat %s", input.ProviderID)),
+		Title:          firstNonEmpty(input.Title, fmt.Sprintf("New %s chat", input.ProviderID)),
 		CWD:            input.CWD,
 		Status:         StatusIdle,
 		Messages:       []Message{},
 		PendingActions: []PendingAction{},
 		CreatedAt:      now,
 		UpdatedAt:      now,
+	}
+	if input.ProviderID == "gemini" {
+		inst.ProviderSessionID = instanceUUID(id)
 	}
 	s.mu.Lock()
 	s.instances[inst.ID] = inst
@@ -405,13 +530,14 @@ func (s *Store) CreateInternal(input CreateInternalInput) Instance {
 }
 
 type RegisterExternalInput struct {
-	Title           string
-	CWD             string
-	TTY             string
-	PID             int
-	ClaudeSessionID string
-	TranscriptPath  string
-	ProviderID      string
+	Title             string
+	CWD               string
+	TTY               string
+	PID               int
+	ProviderSessionID string
+	ClaudeSessionID   string
+	TranscriptPath    string
+	ProviderID        string
 }
 
 func (s *Store) RegisterExternal(input RegisterExternalInput) Instance {
@@ -419,6 +545,39 @@ func (s *Store) RegisterExternal(input RegisterExternalInput) Instance {
 	defer s.mu.Unlock()
 
 	now := timestamp()
+	if input.TranscriptPath != "" {
+		for _, inst := range s.instances {
+			if inst.ProviderID == input.ProviderID && inst.TranscriptPath == input.TranscriptPath {
+				if input.Title != "" {
+					inst.Title = input.Title
+				}
+				if input.CWD != "" {
+					inst.CWD = input.CWD
+				}
+				if input.TTY != "" {
+					inst.TTY = input.TTY
+				}
+				if input.PID != 0 {
+					inst.PID = input.PID
+				}
+				if input.ClaudeSessionID != "" {
+					inst.ClaudeSessionID = input.ClaudeSessionID
+				}
+				if input.ProviderSessionID != "" {
+					inst.ProviderSessionID = input.ProviderSessionID
+				}
+				if inst.Status == StatusOffline {
+					inst.Status = StatusIdle
+				}
+				inst.UpdatedAt = now
+				_ = s.persistLocked()
+				clone := *cloneInstance(inst)
+				s.emitLocked(Event{Kind: EventInstanceUpdated, ID: inst.ID, Payload: clone})
+				return clone
+			}
+		}
+	}
+
 	if input.ClaudeSessionID != "" {
 		for _, inst := range s.instances {
 			if inst.ClaudeSessionID == input.ClaudeSessionID {
@@ -434,7 +593,13 @@ func (s *Store) RegisterExternal(input RegisterExternalInput) Instance {
 				if input.PID != 0 {
 					inst.PID = input.PID
 				}
+				if input.ProviderSessionID != "" {
+					inst.ProviderSessionID = input.ProviderSessionID
+				}
 				if input.TranscriptPath != "" {
+					if inst.TranscriptPath != input.TranscriptPath {
+						inst.TranscriptOffset = 0
+					}
 					inst.TranscriptPath = input.TranscriptPath
 				}
 				if inst.Status == StatusOffline {
@@ -453,22 +618,23 @@ func (s *Store) RegisterExternal(input RegisterExternalInput) Instance {
 	if providerID == "" {
 		providerID = "claude"
 	}
-	title := firstNonEmpty(input.Title, defaultExternalTitle(input.CWD))
+	title := firstNonEmpty(input.Title, defaultExternalTitle(providerID, input.CWD))
 	inst := &Instance{
-		ID:              newID(),
-		ProviderID:      providerID,
-		Origin:          OriginExternal,
-		Title:           title,
-		CWD:             input.CWD,
-		TTY:             input.TTY,
-		PID:             input.PID,
-		ClaudeSessionID: input.ClaudeSessionID,
-		TranscriptPath:  input.TranscriptPath,
-		Status:          StatusIdle,
-		Messages:        []Message{},
-		PendingActions:  []PendingAction{},
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:                newID(),
+		ProviderID:        providerID,
+		Origin:            OriginExternal,
+		Title:             title,
+		CWD:               input.CWD,
+		TTY:               input.TTY,
+		PID:               input.PID,
+		ProviderSessionID: input.ProviderSessionID,
+		ClaudeSessionID:   input.ClaudeSessionID,
+		TranscriptPath:    input.TranscriptPath,
+		Status:            StatusIdle,
+		Messages:          []Message{},
+		PendingActions:    []PendingAction{},
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	s.instances[inst.ID] = inst
 	_ = s.persistLocked()
@@ -538,7 +704,31 @@ func (s *Store) SetTerminalAttached(id string, attached bool, pid int) (Instance
 	}
 	if !attached {
 		inst.Status = StatusOffline
+		inst.PID = 0
+		inst.TTY = ""
 	}
+	inst.UpdatedAt = timestamp()
+	_ = s.persistLocked()
+	clone := *cloneInstance(inst)
+	s.emitLocked(Event{Kind: EventInstanceUpdated, ID: inst.ID, Payload: clone})
+	return clone, true
+}
+
+func (s *Store) MarkTerminalExited(id string, pid int) (Instance, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inst, ok := s.instances[id]
+	if !ok {
+		return Instance{}, false
+	}
+	if pid != 0 && inst.PID != 0 && inst.PID != pid {
+		return *cloneInstance(inst), true
+	}
+	inst.TerminalAttached = false
+	inst.Status = StatusOffline
+	inst.PID = 0
+	inst.TTY = ""
+	inst.CurrentTool = ""
 	inst.UpdatedAt = timestamp()
 	_ = s.persistLocked()
 	clone := *cloneInstance(inst)
@@ -569,6 +759,9 @@ func (s *Store) AttachClaude(id string, input AttachClaudeInput) (Instance, bool
 		inst.ClaudeSessionID = input.ClaudeSessionID
 	}
 	if input.TranscriptPath != "" {
+		if inst.TranscriptPath != input.TranscriptPath {
+			inst.TranscriptOffset = 0
+		}
 		inst.TranscriptPath = input.TranscriptPath
 	}
 	if input.TTY != "" {
@@ -580,6 +773,28 @@ func (s *Store) AttachClaude(id string, input AttachClaudeInput) (Instance, bool
 	if input.CWD != "" && inst.CWD == "" {
 		inst.CWD = input.CWD
 	}
+	inst.UpdatedAt = timestamp()
+	_ = s.persistLocked()
+	clone := *cloneInstance(inst)
+	s.emitLocked(Event{Kind: EventInstanceUpdated, ID: inst.ID, Payload: clone})
+	return clone, true
+}
+
+func (s *Store) SetProviderSessionID(id string, providerSessionID string) (Instance, bool) {
+	providerSessionID = strings.TrimSpace(providerSessionID)
+	if providerSessionID == "" {
+		return Instance{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inst, ok := s.instances[id]
+	if !ok {
+		return Instance{}, false
+	}
+	if inst.ProviderSessionID == providerSessionID {
+		return *cloneInstance(inst), true
+	}
+	inst.ProviderSessionID = providerSessionID
 	inst.UpdatedAt = timestamp()
 	_ = s.persistLocked()
 	clone := *cloneInstance(inst)
@@ -602,8 +817,9 @@ func (s *Store) SetExternalAttachCmd(id string, cmd string) {
 }
 
 type AppendInput struct {
-	Role Role
-	Text string
+	Role     Role
+	Text     string
+	SourceID string
 }
 
 func (s *Store) AppendMessage(id string, input AppendInput) (Instance, bool, bool) {
@@ -624,15 +840,35 @@ func (s *Store) AppendMessage(id string, input AppendInput) (Instance, bool, boo
 	log.Printf("AppendMessage id=%s provider=%s role=%s text=%q", shortID(id), inst.ProviderID, input.Role, preview)
 	// Dedup against the last 30 messages to absorb the case where the same message
 	// arrives both via direct API (user/assistant) and via the JSONL transcript watcher.
-	limit := len(inst.Messages)
-	if limit > 30 {
-		limit = 30
-	}
-	for i := len(inst.Messages) - limit; i < len(inst.Messages); i++ {
-		existing := inst.Messages[i]
-		if existing.Role == input.Role && strings.TrimSpace(existing.Text) == text {
-			clone := *cloneInstance(inst)
-			return clone, false, true
+	if input.SourceID != "" {
+		for _, existing := range inst.Messages {
+			if existing.SourceID == input.SourceID {
+				clone := *cloneInstance(inst)
+				return clone, false, true
+			}
+		}
+		limit := len(inst.Messages)
+		if limit > 30 {
+			limit = 30
+		}
+		for i := len(inst.Messages) - limit; i < len(inst.Messages); i++ {
+			existing := inst.Messages[i]
+			if existing.SourceID == "" && existing.Role == input.Role && strings.TrimSpace(existing.Text) == text {
+				clone := *cloneInstance(inst)
+				return clone, false, true
+			}
+		}
+	} else {
+		limit := len(inst.Messages)
+		if limit > 30 {
+			limit = 30
+		}
+		for i := len(inst.Messages) - limit; i < len(inst.Messages); i++ {
+			existing := inst.Messages[i]
+			if existing.SourceID == "" && existing.Role == input.Role && strings.TrimSpace(existing.Text) == text {
+				clone := *cloneInstance(inst)
+				return clone, false, true
+			}
 		}
 	}
 	msg := Message{
@@ -640,16 +876,17 @@ func (s *Store) AppendMessage(id string, input AppendInput) (Instance, bool, boo
 		Role:      input.Role,
 		Text:      text,
 		CreatedAt: timestamp(),
+		SourceID:  input.SourceID,
 	}
 	inst.Messages = append(inst.Messages, msg)
 	inst.LastMessage = text
 	inst.UpdatedAt = msg.CreatedAt
 	if input.Role == RoleUser {
-		topic := text
-		if len(topic) > 80 {
-			topic = topic[:80] + "…"
+		topic := SmartTopic(inst.Messages, inst.Topic)
+		if topic != "" {
+			inst.Topic = topic
+			inst.Title = topic
 		}
-		inst.Topic = topic
 		// User responded, clear any pending prompts
 		inst.PendingQuestion = ""
 		inst.PendingActions = []PendingAction{}
@@ -727,14 +964,39 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func defaultExternalTitle(cwd string) string {
+func defaultExternalTitle(providerID string, cwd string) string {
 	cwd = strings.TrimSpace(cwd)
+	label := providerLabel(providerID)
 	if cwd == "" {
-		return "Claude externo"
+		return "External " + label
 	}
 	base := filepath.Base(cwd)
 	if base == "." || base == "/" || base == "" {
-		return "Claude externo"
+		return "External " + label
 	}
-	return "Claude · " + base
+	return label + " · " + base
+}
+
+func providerLabel(providerID string) string {
+	switch strings.ToLower(strings.TrimSpace(providerID)) {
+	case "codex":
+		return "Codex"
+	case "gemini":
+		return "Gemini"
+	default:
+		return "Claude"
+	}
+}
+
+func instanceUUID(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if len(id) != 32 {
+		return id
+	}
+	for _, r := range id {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return id
+		}
+	}
+	return id[0:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:32]
 }

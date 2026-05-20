@@ -4,7 +4,7 @@
 
 [🇺🇸 Read in English](./README.md)
 
-CLIchat transforma os CLIs do Claude Code e Codex em uma interface de
+CLIchat transforma Claude Code, OpenAI Codex e Gemini CLI em uma interface de
 mensageiro: uma conversa por linha, PTYs reais rodando em background, pílulas
 de status pra cada ferramenta que o agente dispara (Bash / Read / Write /
 Web / …), renderização de markdown, animação de digitação, contadores de
@@ -13,8 +13,9 @@ fazendo **agora**.
 
 Ele detecta toda sessão Claude rodando na sua máquina — inclusive as que você
 abriu em outro terminal fora do app — e mostra cada uma como um chat.
-Persiste o histórico entre reinícios e reconecta com `claude --resume`,
-preservando o contexto.
+Persiste o histórico entre reinícios e, quando um terminal precisa ser
+substituído, abre um terminal novo recebendo a memória/resumo daquele mesmo
+chat como contexto inicial.
 
 Feito no Brasil 🇧🇷 por [@luisdemarchi](https://github.com/luisdemarchi).
 
@@ -34,16 +35,19 @@ Feito no Brasil 🇧🇷 por [@luisdemarchi](https://github.com/luisdemarchi).
 - **Status por ferramenta** — trabalhando ⚙️, Bash 💻, Read 🔍, Write 📝,
   Agent ⚡, Web 🌐, aguardando ❓, ocioso 💤. Clique na pílula pra abrir o
   terminal embutido.
-- **Tópico como nome** — Claude chama uma MCP tool `agent_chat_set_topic`
-  no começo de cada tarefa; o nome do chat passa a ser a tarefa atual
-  (`"analisando card S3-15693"`).
+- **Tópico como nome** — o daemon deriva um título curto a partir da intenção
+  mais recente do chat e também aceita a MCP tool `agent_chat_set_topic`.
+  O nome visível acompanha o assunto atual, mesmo quando o provider não chama
+  nenhuma ferramenta.
 - **Descoberta automática** — toda rollout do Claude
   (`~/.claude/projects/*/*.jsonl`), Codex (`~/.codex/sessions/...`) e Gemini
   (`~/.gemini/tmp/.../session-*.jsonl`) é monitorada. Sessões abertas fora
   do app são linkadas ao chat interno correspondente pelo CWD + timestamp.
-- **Reconectar ao reabrir** — fechar e abrir o app re-spawna cada chat com
-  `claude --resume <session-id>` (Claude) ou `codex resume --last` (Codex).
-  Conversa continua.
+- **Memória por chat + handoff de terminal** — cada conversa é indexada em
+  SQLite/FTS5 (`~/.clichat/memory.sqlite3`). Se o terminal fechar, o chat
+  continua intacto e mostra um botão para abrir um terminal novo com a memória
+  compacta dessa conversa. A mesma conversa também pode ser transferida para
+  outro provider, como Claude, Codex ou Gemini.
 - **Permissões viram botões** — quando uma TUI mostra
   `Choose: ❯ 1) yes ❯ 2) no` (ou `(y/n)`), o detector reconhece e renderiza
   as opções como botões dentro do chat.
@@ -58,24 +62,26 @@ Feito no Brasil 🇧🇷 por [@luisdemarchi](https://github.com/luisdemarchi).
                                      │                          │
                                      │  • PTY manager           │
                                      │  • State JSON            │
+                                     │  • Memória SQLite/FTS5   │
                                      │  • MCP HTTP /mcp         │
                                      │  • Discovery + watcher   │
                                      │  • Prompt detector       │
                                      └────────────┬─────────────┘
                                                   ▲
                        ~/.claude/settings.json    │ POST /v1/instances/...
-                       hooks → agentctl hook *    │
+                       hooks → clichat hook *     │
 ```
 
-Três binários:
+Dois comandos instalados mais o app desktop:
 
-- **`clichat`** (`main.go` + `internal/app`) — app desktop Wails. Cliente
+- **`CLIchat.app`** (`main.go` + `internal/app`) — app desktop Wails. Cliente
   thin.
+- **`clichat`** (`cmd/clichat`) — instalador/repair/status em um comando e
+  helper dos hooks do Claude Code.
 - **`clichat-host`** (`cmd/clichat-host`) — daemon em `127.0.0.1:47657` (HTTP) e
   `:47656` (TCP attach). Dono de todos os PTYs e do estado persistente
-  em `~/.clichat/state.json`.
-- **`agentctl`** (`cmd/agentctl`) — CLI usado pelos hooks do Claude Code
-  (`agentctl hook session-start|stop|pre-tool-use|post-tool-use|user-prompt-submit`).
+  em `~/.clichat/state.json` + memória por chat em
+  `~/.clichat/memory.sqlite3`.
 
 ## Pré-requisitos
 
@@ -85,6 +91,7 @@ Instale uma vez no computador:
 |------------|---------|------------|
 | Go ≥ 1.25 | Compilar daemon + app Wails | `brew install go` (mac) / `sudo apt install golang` (Linux) |
 | Node ≥ 20 + pnpm | Compilar frontend React | `brew install node && npm i -g pnpm` |
+| SQLite 3 com FTS5 | Memória local e busca por chat | `brew install sqlite` (mac) / `sudo apt install sqlite3` (Linux) |
 | Wails v2.12 CLI | Empacotar app desktop | `go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0` (o instalador roda automaticamente se faltar) |
 | Xcode CLT (macOS) | Cgo / WebKit | `xcode-select --install` |
 | `claude` CLI | Provedor Claude Code | https://docs.claude.com/claude-code |
@@ -98,28 +105,39 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 
 ## Instalar
 
-Um comando:
+Um comando, sem baixar o código manualmente:
 
 ```bash
-git clone https://github.com/luisdemarchi/CLIchat.git
-cd CLIchat
-./scripts/install.sh
+go install github.com/luisdemarchi/CLIchat/cmd/clichat@latest
+clichat install
 ```
 
 O instalador faz, em ordem:
 
-1. **Compila `clichat-host` e `agentctl`** em `~/.local/bin/`.
-2. **Instala os hooks do Claude Code** em `~/.claude/settings.json`
+1. **Resolve a source do CLIchat pelo cache de módulos do Go**. Se precisar,
+   o próprio Go baixa `github.com/luisdemarchi/CLIchat@latest`.
+2. **Compila `clichat-host` e `clichat`** em `~/.local/bin/`.
+3. **Prepara `~/.clichat/`**, incluindo `state.json`, logs e o banco
+   `memory.sqlite3` usado para memória por chat.
+4. **Instala os hooks do Claude Code** em `~/.claude/settings.json`
    (`SessionStart`, `Stop`, `PreToolUse`, `PostToolUse`, `UserPromptSubmit`)
    pra que toda sessão Claude — mesmo as abertas fora do app — reporte
    status pra CLIchat.
-3. **Compila o app desktop Wails** e copia pra `/Applications/CLIchat.app`
+5. **Compila o app desktop Wails** e copia pra `/Applications/CLIchat.app`
    (macOS) ou `~/.local/share/clichat/CLIchat` (Linux).
-4. **Registra o daemon como serviço** pra subir no login:
+6. **Registra o daemon como serviço** pra subir no login:
    - macOS: `~/Library/LaunchAgents/com.clichat.host.plist` (launchd)
    - Linux: `~/.config/systemd/user/clichat.service` (systemd user)
 
-Re-rodar `./scripts/install.sh` é idempotente.
+Re-rodar `clichat install` ou `clichat repair` é idempotente.
+
+Só para desenvolvimento local:
+
+```bash
+git clone https://github.com/luisdemarchi/CLIchat.git
+cd CLIchat
+go run ./cmd/clichat install
+```
 
 ## Como usar
 
@@ -165,25 +183,30 @@ de leitura.
 
 - O daemon (`clichat-host`) continua rodando em background, então os PTYs
   ficam vivos quando você fecha o app.
-- Se você matar o daemon de fato, na próxima abertura o CLIchat
-  re-spawna cada chat interno com `claude --resume <session-id>` (Claude)
-  ou `codex resume --last` (Codex), então a conversa continua.
+- Se você matar o daemon de fato, na próxima abertura o CLIchat mantém o
+  histórico do chat e mostra uma ação explícita para abrir um terminal novo.
+  Esse terminal recebe um prompt de handoff compacto com a memória interna
+  daquela conversa, incluindo o assunto atual.
+- Se você transferir um chat de Claude para Codex, Gemini ou de volta, o PTY
+  antigo é parado, o mesmo registro de chat continua no lugar e o novo terminal
+  recebe a memória interna daquele chat como contexto inicial.
 
 ### 6. Atalhos no terminal
 
 ```bash
-agentctl list            # lista as conversas que o daemon conhece
-agentctl install-hooks   # reescreve os hooks do Claude Code (idempotente)
-agentctl uninstall-hooks # remove só os hooks
-clichat-host serve         # roda o daemon manualmente (debug)
+clichat status           # verifica host, hooks, estado e memória
+clichat logs             # mostra logs recentes do host
+clichat repair           # recompila, repara hooks e reinicia o serviço
+clichat-host serve       # roda o daemon manualmente (debug)
 ```
 
-Estado em `~/.clichat/state.json`. Logs em `~/.clichat/logs/`.
+Estado em `~/.clichat/state.json`. Memória/busca em
+`~/.clichat/memory.sqlite3`. Logs em `~/.clichat/logs/`.
 
 ## Troubleshooting
 
 - **Pílula de status não aparece** → `~/.claude/settings.json` está sem
-  os hooks gerenciados. Rode `agentctl install-hooks`.
+  os hooks gerenciados. Rode `clichat repair`.
 - **Sessão Codex com balões vazios** → o Codex grava em
   `~/.codex/sessions`; o CLIchat só importa rollouts com até ~5 min de
   modificação. Mande mais um turno e ele pega automaticamente.

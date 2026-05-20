@@ -1,4 +1,4 @@
-module clichat
+module github.com/luisdemarchi/CLIchat
 
 go 1.25.0
 

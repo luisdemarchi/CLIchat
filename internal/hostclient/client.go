@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"clichat/internal/agent"
+	"github.com/luisdemarchi/CLIchat/internal/agent"
 )
 
 const DefaultHTTPAddress = "http://127.0.0.1:47657"
@@ -76,6 +76,33 @@ func (c *Client) State(ctx context.Context) (StateResponse, error) {
 	return out, json.NewDecoder(res.Body).Decode(&out)
 }
 
+type ConversationMemory struct {
+	ConversationID string `json:"conversationId"`
+	ProviderID     string `json:"providerId"`
+	Title          string `json:"title"`
+	Topic          string `json:"topic"`
+	Summary        string `json:"summary"`
+	MessageCount   int    `json:"messageCount"`
+	UpdatedAt      string `json:"updatedAt"`
+}
+
+func (c *Client) ConversationMemory(ctx context.Context, instanceID string) (ConversationMemory, error) {
+	var out ConversationMemory
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/memory/"+instanceID+"/summary", nil)
+	if err != nil {
+		return out, err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return out, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return out, decodeError(res)
+	}
+	return out, json.NewDecoder(res.Body).Decode(&out)
+}
+
 type CreateInstanceInput struct {
 	Origin     agent.Origin `json:"origin"`
 	ProviderID string       `json:"providerId"`
@@ -88,6 +115,23 @@ func (c *Client) CreateInstance(ctx context.Context, input CreateInstanceInput) 
 		input.Origin = agent.OriginInternal
 	}
 	return c.postInstance(ctx, c.baseURL+"/v1/instances", input)
+}
+
+func (c *Client) GetInstance(ctx context.Context, instanceID string) (agent.Instance, error) {
+	var out agent.Instance
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/instances/"+instanceID, nil)
+	if err != nil {
+		return out, err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return out, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return out, decodeError(res)
+	}
+	return out, json.NewDecoder(res.Body).Decode(&out)
 }
 
 type StartTerminalInput struct {
@@ -103,6 +147,10 @@ func (c *Client) StartTerminal(ctx context.Context, instanceID string, input Sta
 
 func (c *Client) StopTerminal(ctx context.Context, instanceID string) (agent.Instance, error) {
 	return c.postInstance(ctx, c.baseURL+"/v1/instances/"+instanceID+"/stop-terminal", map[string]any{})
+}
+
+func (c *Client) SetProvider(ctx context.Context, instanceID string, providerID string) (agent.Instance, error) {
+	return c.postInstance(ctx, c.baseURL+"/v1/instances/"+instanceID+"/provider", map[string]string{"providerId": providerID})
 }
 
 type messagePayload struct {

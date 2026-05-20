@@ -11,13 +11,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"clichat/internal/agent"
-	"clichat/internal/mirror"
-	"clichat/internal/terminal"
+	"github.com/luisdemarchi/CLIchat/internal/agent"
+	"github.com/luisdemarchi/CLIchat/internal/memory"
+	"github.com/luisdemarchi/CLIchat/internal/mirror"
+	"github.com/luisdemarchi/CLIchat/internal/terminal"
 )
 
 const (
@@ -27,6 +29,7 @@ const (
 
 type server struct {
 	manager   *terminal.Manager
+	memory    *memory.Store
 	mirror    *mirror.Server
 	store     *agent.Store
 	watcher   *agent.TranscriptWatcher
@@ -43,7 +46,7 @@ type hostEvent struct {
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: clichat-host serve [--http addr] [--attach addr] [--state path]")
+		fmt.Fprintln(os.Stderr, "usage: clichat-host serve [--http addr] [--attach addr] [--state path] [--memory path]")
 	}
 
 	if len(os.Args) < 2 || os.Args[1] != "serve" {
@@ -55,6 +58,7 @@ func main() {
 	httpAddr := args.String("http", defaultHTTPAddress, "HTTP listen address")
 	attachAddr := args.String("attach", defaultTTYAddress, "TTY attach address")
 	statePath := args.String("state", defaultStatePath(), "Path to persistent state file")
+	memoryPath := args.String("memory", defaultMemoryPath(), "Path to SQLite memory database")
 	if err := args.Parse(os.Args[2:]); err != nil {
 		log.Fatal(err)
 	}
@@ -63,14 +67,23 @@ func main() {
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
+	memoryStore, err := memory.New(*memoryPath)
+	if err != nil {
+		log.Fatalf("memory: %v", err)
+	}
 
 	manager := terminal.NewManager()
 	s := &server{
 		manager:   manager,
+		memory:    memoryStore,
 		store:     store,
 		prompts:   agent.NewPromptDetector(),
 		eventSubs: make(map[string]map[int]chan hostEvent),
 	}
+	if err := s.memory.SyncSnapshot(store.Snapshot()); err != nil {
+		log.Printf("memory initial sync: %v", err)
+	}
+	store.Subscribe(s.syncMemoryEvents)
 	s.watcher = agent.NewTranscriptWatcher(store)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -87,10 +100,11 @@ func main() {
 	mux.HandleFunc("/mcp", s.mcp)
 	mux.HandleFunc("/v1/state", s.state)
 	mux.HandleFunc("/v1/state/events", s.stateEvents)
+	mux.HandleFunc("/v1/memory/", s.memoryRoute)
 	mux.HandleFunc("/v1/instances", s.instancesCollection)
 	mux.HandleFunc("/v1/instances/", s.instance)
 
-	log.Printf("clichat-host listening http=%s attach=%s state=%s", *httpAddr, *attachAddr, *statePath)
+	log.Printf("clichat-host listening http=%s attach=%s state=%s memory=%s", *httpAddr, *attachAddr, *statePath, *memoryPath)
 	if err := http.ListenAndServe(*httpAddr, mux); err != nil {
 		log.Fatal(err)
 	}
@@ -102,6 +116,38 @@ func defaultStatePath() string {
 		return "clichat-state.json"
 	}
 	return filepath.Join(home, ".clichat", "state.json")
+}
+
+func defaultMemoryPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "clichat-memory.sqlite3"
+	}
+	return filepath.Join(home, ".clichat", "memory.sqlite3")
+}
+
+func (s *server) syncMemoryEvents(events []agent.Event) {
+	if s.memory == nil {
+		return
+	}
+	for _, event := range events {
+		switch event.Kind {
+		case agent.EventInstanceUpdated:
+			inst, ok := event.Payload.(agent.Instance)
+			if !ok {
+				continue
+			}
+			if err := s.memory.SyncInstance(inst); err != nil {
+				log.Printf("memory sync instance=%s: %v", event.ID, err)
+			}
+		case agent.EventInstanceRemoved:
+			if event.ID != "" {
+				if err := s.memory.DeleteConversation(event.ID); err != nil {
+					log.Printf("memory delete instance=%s: %v", event.ID, err)
+				}
+			}
+		}
+	}
 }
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
@@ -168,6 +214,73 @@ func (s *server) stateEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *server) memoryRoute(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(strings.Trim(r.URL.Path, "/"), "v1/memory/"), "/")
+	if len(parts) != 2 || parts[0] == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	id := parts[0]
+	action := parts[1]
+	switch action {
+	case "summary":
+		s.memorySummary(w, r, id)
+	case "search":
+		s.memorySearch(w, r, id)
+	default:
+		writeError(w, http.StatusNotFound, "not found")
+	}
+}
+
+func (s *server) memorySummary(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	inst, ok := s.store.Get(id)
+	if ok && s.memory != nil {
+		if err := s.memory.SyncInstance(inst); err != nil {
+			log.Printf("memory summary sync instance=%s: %v", id, err)
+		}
+	}
+	if s.memory != nil {
+		mem, err := s.memory.Conversation(id)
+		if err == nil {
+			writeJSON(w, http.StatusOK, mem)
+			return
+		}
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, memory.BuildConversationMemory(inst, 12000))
+}
+
+func (s *server) memorySearch(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if _, ok := s.store.Get(id); !ok {
+		writeError(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := 20
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			limit = parsed
+		}
+	}
+	results, err := s.memory.SearchConversation(id, query, limit)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
 func (s *server) instancesCollection(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -231,6 +344,8 @@ func (s *server) instance(w http.ResponseWriter, r *http.Request) {
 		s.instanceRoot(w, r, id)
 	case "status":
 		s.instanceStatus(w, r, id)
+	case "provider":
+		s.instanceProvider(w, r, id)
 	case "message":
 		s.instanceMessage(w, r, id)
 	case "pending":
@@ -273,6 +388,34 @@ func (s *server) instanceRoot(w http.ResponseWriter, r *http.Request, id string)
 type statusRequest struct {
 	Status string `json:"status"`
 	Tool   string `json:"tool"`
+}
+
+type providerRequest struct {
+	ProviderID string `json:"providerId"`
+}
+
+func (s *server) instanceProvider(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var input providerRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if strings.TrimSpace(input.ProviderID) == "" {
+		writeError(w, http.StatusBadRequest, "providerId is required")
+		return
+	}
+	_ = s.manager.Stop(id)
+	s.prompts.Clear(id)
+	inst, ok := s.store.SetProvider(id, input.ProviderID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
 }
 
 func (s *server) instanceStatus(w http.ResponseWriter, r *http.Request, id string) {
@@ -465,12 +608,13 @@ func (s *server) instanceStartTerminal(w http.ResponseWriter, r *http.Request, i
 	// Drive, iCloud, etc.) and MediaLibrary (Apple Music). Older instances
 	// were created with CWD=$HOME — auto-migrate them to the sandbox here.
 	if home, err := os.UserHomeDir(); err == nil {
-		sandbox := filepath.Join(home, ".clichat", "sandbox")
-		_ = os.MkdirAll(sandbox, 0o755)
 		if effectiveCWD == "" || effectiveCWD == home {
+			sandbox := filepath.Join(home, ".clichat", "sandbox", id)
+			_ = os.MkdirAll(sandbox, 0o755)
 			effectiveCWD = sandbox
 		}
 	}
+	var processPID int
 	process, err := s.manager.Start(terminal.StartOptions{
 		SessionID:  id,
 		ProviderID: inst.ProviderID,
@@ -480,7 +624,7 @@ func (s *server) instanceStartTerminal(w http.ResponseWriter, r *http.Request, i
 		Env:        input.Env,
 		OnExit: func(sessionID string, _ error) {
 			s.manager.Forget(sessionID)
-			s.store.SetTerminalAttached(sessionID, false, 0)
+			s.store.MarkTerminalExited(sessionID, processPID)
 			s.prompts.Clear(sessionID)
 		},
 	})
@@ -488,9 +632,10 @@ func (s *server) instanceStartTerminal(w http.ResponseWriter, r *http.Request, i
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	processPID = process.PID()
 	// Persist the working directory so the JSONL→instance linker can match against it.
 	s.store.UpdateCWD(id, effectiveCWD)
-	updated, _ := s.store.SetTerminalAttached(id, true, process.PID())
+	updated, _ := s.store.SetTerminalAttached(id, true, processPID)
 	go s.runPromptWatcher(id)
 	writeJSON(w, http.StatusOK, updated)
 }
@@ -778,8 +923,8 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 			question := strings.TrimSpace(stringArg(params.Arguments, "question"))
 			if question != "" {
 				s.store.SetPending(id, question, []agent.PendingAction{
-					{ID: "yes", Label: "Sim", Input: "y"},
-					{ID: "no", Label: "Nao", Input: "n"},
+					{ID: "yes", Label: "Yes", Input: "y"},
+					{ID: "no", Label: "No", Input: "n"},
 				})
 				s.emit(id, hostEvent{Type: "question", Data: []byte(question)})
 			}

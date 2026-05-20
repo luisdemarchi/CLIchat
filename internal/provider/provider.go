@@ -34,7 +34,7 @@ func Defaults() []Provider {
 			CLI:         "claude",
 			Tag:         "CLAUDE",
 			Accent:      "#6f5adc",
-			Description: "Claude Code em uma sessao local controlada pelo app.",
+			Description: "Claude Code in an app-managed local session.",
 		},
 		{
 			ID:          Codex,
@@ -43,7 +43,16 @@ func Defaults() []Provider {
 			Args:        []string{"--no-alt-screen"},
 			Tag:         "CODEX",
 			Accent:      "#a45f18",
-			Description: "Codex CLI em uma sessao local controlada pelo app.",
+			Description: "Codex CLI in an app-managed local session.",
+		},
+		{
+			ID:          Gemini,
+			Name:        "Gemini",
+			CLI:         "gemini",
+			Args:        []string{"--screen-reader", "--skip-trust"},
+			Tag:         "GEMINI",
+			Accent:      "#167c80",
+			Description: "Gemini CLI in an app-managed local session.",
 		},
 	}
 

@@ -2,12 +2,15 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +33,7 @@ func safeID(id string) string { return shortID(id) }
 // the transcript for plumbing (background task results, hook output, slash
 // commands, etc). When a transcript entry starts with one of these tags we
 // drop it instead of rendering it as a user/assistant bubble.
-var systemContentTag = regexp.MustCompile(`(?s)^\s*<([a-z][a-z0-9-]*)>`)
+var systemContentTag = regexp.MustCompile(`(?s)^\s*<([a-z][a-z0-9_-]*)>`)
 
 var systemTagSet = map[string]struct{}{
 	"task-notification":       {},
@@ -47,6 +50,7 @@ var systemTagSet = map[string]struct{}{
 	"bash-stdin-disabled":     {},
 	"function_calls":          {},
 	"function_results":        {},
+	"environment_context":     {},
 }
 
 func isSystemTranscriptEntry(text string) bool {
@@ -61,11 +65,13 @@ func isSystemTranscriptEntry(text string) bool {
 const maxTranscriptLine = 4 * 1024 * 1024
 
 type TranscriptEntry struct {
-	Type            string
-	Role            Role
-	Text            string
-	Tool            string
-	ClaudeSessionID string
+	Type              string
+	Role              Role
+	Text              string
+	Tool              string
+	SourceID          string
+	ProviderSessionID string
+	ClaudeSessionID   string
 }
 
 type transcriptCursor struct {
@@ -148,10 +154,11 @@ func (w *TranscriptWatcher) discover() {
 		}
 		cwd := projectDirFromHash(filepath.Base(filepath.Dir(path)))
 		w.store.RegisterExternal(RegisterExternalInput{
-			ProviderID:      "claude",
-			CWD:             cwd,
-			ClaudeSessionID: claudeID,
-			TranscriptPath:  path,
+			ProviderID:        "claude",
+			CWD:               cwd,
+			ProviderSessionID: claudeID,
+			ClaudeSessionID:   claudeID,
+			TranscriptPath:    path,
 		})
 		w.track(path)
 		return nil
@@ -173,20 +180,22 @@ func (w *TranscriptWatcher) discover() {
 			w.track(path)
 			return nil
 		}
-		cwd, sessionStarted := codexSessionMeta(path)
+		providerSessionID, cwd, sessionStarted := codexSessionMeta(path)
 		// 1) try to attach to a still-unlinked internal Codex chat that matches CWD + time window.
 		if cwd != "" {
 			if inst, ok := w.store.FindAwaitingTranscript("codex", cwd, sessionStarted.Add(-2*time.Minute)); ok {
 				w.store.SetTranscriptPath(inst.ID, path)
+				w.store.SetProviderSessionID(inst.ID, providerSessionID)
 				w.track(path)
 				return nil
 			}
 		}
 		// 2) otherwise it is a Codex run started outside the app — register external (UI hides it).
 		w.store.RegisterExternal(RegisterExternalInput{
-			ProviderID:     "codex",
-			CWD:            cwd,
-			TranscriptPath: path,
+			ProviderID:        "codex",
+			CWD:               cwd,
+			ProviderSessionID: providerSessionID,
+			TranscriptPath:    path,
 		})
 		w.track(path)
 		return nil
@@ -208,6 +217,12 @@ func (w *TranscriptWatcher) discover() {
 			w.track(path)
 			return nil
 		}
+		geminiSessionID := geminiSessionIDFromPath(path)
+		if inst, ok := w.store.FindByProviderSessionID("gemini", geminiSessionID); ok {
+			w.store.SetTranscriptPath(inst.ID, path)
+			w.track(path)
+			return nil
+		}
 		// Gemini buckets sessions under tmp/<sha-of-cwd>/chats/. We don't have the cwd
 		// directly in the file, but the linking heuristic falls back on file mtime vs.
 		// internal CreatedAt; matching is only attempted when an internal Gemini chat
@@ -216,14 +231,16 @@ func (w *TranscriptWatcher) discover() {
 		if cwdHint != "" {
 			if inst, ok := w.store.FindAwaitingTranscript("gemini", cwdHint, info.ModTime().Add(-2*time.Minute)); ok {
 				w.store.SetTranscriptPath(inst.ID, path)
+				w.store.SetProviderSessionID(inst.ID, geminiSessionID)
 				w.track(path)
 				return nil
 			}
 		}
 		w.store.RegisterExternal(RegisterExternalInput{
-			ProviderID:     "gemini",
-			CWD:            cwdHint,
-			TranscriptPath: path,
+			ProviderID:        "gemini",
+			CWD:               cwdHint,
+			ProviderSessionID: geminiSessionID,
+			TranscriptPath:    path,
 		})
 		w.track(path)
 		return nil
@@ -233,29 +250,45 @@ func (w *TranscriptWatcher) discover() {
 // codexSessionMeta reads the first JSONL line of a rollout file and returns
 // (cwd, started_at) extracted from the `session_meta` payload. Empty values on
 // any read/parse failure.
-func codexSessionMeta(path string) (string, time.Time) {
+func codexSessionMeta(path string) (string, string, time.Time) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", time.Time{}
+		return codexSessionIDFromPath(path), "", time.Time{}
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), maxTranscriptLine)
 	if !scanner.Scan() {
-		return "", time.Time{}
+		return codexSessionIDFromPath(path), "", time.Time{}
 	}
 	var record struct {
 		Type    string `json:"type"`
 		Payload struct {
+			ID        string `json:"id"`
 			CWD       string `json:"cwd"`
 			Timestamp string `json:"timestamp"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(scanner.Bytes(), &record); err != nil || record.Type != "session_meta" {
-		return "", time.Time{}
+		return codexSessionIDFromPath(path), "", time.Time{}
 	}
 	t, _ := time.Parse(time.RFC3339Nano, record.Payload.Timestamp)
-	return record.Payload.CWD, t
+	id := firstNonEmpty(record.Payload.ID, codexSessionIDFromPath(path))
+	return id, record.Payload.CWD, t
+}
+
+func codexSessionIDFromPath(path string) string {
+	name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	parts := strings.Split(name, "-")
+	if len(parts) < 7 || parts[0] != "rollout" {
+		return ""
+	}
+	return strings.Join(parts[len(parts)-5:], "-")
+}
+
+func geminiSessionIDFromPath(path string) string {
+	name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	return strings.TrimPrefix(name, "session-")
 }
 
 // geminiCWDHint returns a best-effort CWD inferred from the parent directory
@@ -286,24 +319,19 @@ func (w *TranscriptWatcher) poll() {
 	w.mu.Unlock()
 
 	for _, cursor := range cursors {
+		inst, found := w.instanceForCursor(cursor.path)
+		if !found {
+			continue
+		}
+		if inst.TranscriptOffset > cursor.offset {
+			cursor.offset = inst.TranscriptOffset
+		}
 		entries, nextOffset, ok := readTranscript(cursor.path, cursor.offset)
 		if !ok {
 			continue
 		}
 		cursor.offset = nextOffset
-
-		var inst Instance
-		var found bool
-		if strings.Contains(cursor.path, ".claude") {
-			claudeID := strings.TrimSuffix(filepath.Base(cursor.path), ".jsonl")
-			inst, found = w.store.FindByClaudeSessionID(claudeID)
-		} else {
-			inst, found = w.store.FindByTranscriptPath(cursor.path)
-		}
-
-		if !found {
-			continue
-		}
+		w.store.SetTranscriptOffset(inst.ID, cursor.path, nextOffset)
 
 		for _, entry := range entries {
 			if entry.Text == "" {
@@ -313,10 +341,14 @@ func (w *TranscriptWatcher) poll() {
 				continue
 			}
 			// Dedup within this cursor session
-			if cursor.seen[entry.Text] {
+			seenKey := entry.SourceID
+			if seenKey == "" {
+				seenKey = entry.Text
+			}
+			if cursor.seen[seenKey] {
 				continue
 			}
-			cursor.seen[entry.Text] = true
+			cursor.seen[seenKey] = true
 
 			preview := entry.Text
 			if len(preview) > 50 {
@@ -324,7 +356,7 @@ func (w *TranscriptWatcher) poll() {
 			}
 			watcherLog("transcript→AppendMessage instance=%s provider=%s path=%s role=%s text=%q",
 				safeID(inst.ID), inst.ProviderID, filepath.Base(cursor.path), entry.Role, preview)
-			w.store.AppendMessage(inst.ID, AppendInput{Role: entry.Role, Text: entry.Text})
+			w.store.AppendMessage(inst.ID, AppendInput{Role: entry.Role, Text: entry.Text, SourceID: entry.SourceID})
 			if entry.Role == RoleAssistant {
 				if entry.Tool != "" {
 					w.store.SetStatus(inst.ID, StatusInput{Status: StatusBusy, Tool: entry.Tool})
@@ -338,32 +370,62 @@ func (w *TranscriptWatcher) poll() {
 	}
 }
 
+func (w *TranscriptWatcher) instanceForCursor(path string) (Instance, bool) {
+	provider := providerFromTranscriptPath(path)
+	if provider == "claude" {
+		claudeID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+		return w.store.FindByClaudeSessionID(claudeID)
+	}
+	return w.store.FindByProviderTranscript(provider, path)
+}
+
 func readTranscript(path string, offset int64) ([]TranscriptEntry, int64, bool) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, offset, false
 	}
 	defer file.Close()
+	if info, err := file.Stat(); err == nil && offset > info.Size() {
+		offset = 0
+	}
 	if _, err := file.Seek(offset, 0); err != nil {
 		return nil, offset, false
 	}
 
 	provider := providerFromTranscriptPath(path)
 
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), maxTranscriptLine)
 	var entries []TranscriptEntry
-	for scanner.Scan() {
-		entry, ok := parseTranscriptLine(scanner.Bytes(), provider)
-		if ok {
-			entries = append(entries, entry)
+	reader := bufio.NewReaderSize(file, 64*1024)
+	next := offset
+	for {
+		lineStart := next
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			if err == io.EOF && line[len(line)-1] != '\n' {
+				break
+			}
+			next += int64(len(line))
+			line = bytes.TrimRight(line, "\r\n")
+			if len(line) <= maxTranscriptLine {
+				entry, ok := parseTranscriptLine(line, provider)
+				if ok {
+					entry.SourceID = transcriptSourceID(path, lineStart)
+					entries = append(entries, entry)
+				}
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return entries, offset, false
 		}
 	}
-	next, err := file.Seek(0, 1)
-	if err != nil {
-		return entries, offset, false
-	}
 	return entries, next, true
+}
+
+func transcriptSourceID(path string, offset int64) string {
+	return path + ":" + strconv.FormatInt(offset, 10)
 }
 
 func parseTranscriptLine(line []byte, provider string) (TranscriptEntry, bool) {
@@ -434,27 +496,44 @@ func parseCodexLine(line []byte) (TranscriptEntry, bool) {
 	}
 
 	entry := TranscriptEntry{Type: record.Type}
-	if record.Type == "event_msg" && record.Payload.Type == "agent_message" {
-		entry.Role = RoleAssistant
-		entry.Text = record.Payload.Message
+	if record.Type == "event_msg" && record.Payload.Type == "user_message" {
+		entry.Role = RoleUser
+		entry.Text = strings.TrimSpace(record.Payload.Message)
 		return entry, true
 	}
 	if record.Type == "response_item" && record.Payload.Type == "message" {
-		if record.Payload.Role == "assistant" {
+		switch record.Payload.Role {
+		case "assistant":
 			entry.Role = RoleAssistant
-			var texts []string
-			for _, c := range record.Payload.Content {
-				if c.Type == "output_text" || c.Type == "text" {
-					texts = append(texts, c.Text)
-				}
+			entry.Text = codexTextContent(record.Payload.Content, "output_text", "text")
+			return entry, true
+		case "user":
+			entry.Role = RoleUser
+			entry.Text = codexTextContent(record.Payload.Content, "input_text", "text")
+			if isSystemTranscriptEntry(entry.Text) {
+				return TranscriptEntry{}, false
 			}
-			entry.Text = strings.Join(texts, "\n")
 			return entry, true
 		}
 	}
-	// For user messages in Codex, we might need another pattern if they appear differently.
-	// But usually they are also in the JSONL.
 	return TranscriptEntry{}, false
+}
+
+func codexTextContent(content []struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}, allowed ...string) string {
+	allow := make(map[string]struct{}, len(allowed))
+	for _, item := range allowed {
+		allow[item] = struct{}{}
+	}
+	var texts []string
+	for _, c := range content {
+		if _, ok := allow[c.Type]; ok && strings.TrimSpace(c.Text) != "" {
+			texts = append(texts, strings.TrimSpace(c.Text))
+		}
+	}
+	return strings.Join(texts, "\n")
 }
 
 func parseGeminiLine(line []byte) (TranscriptEntry, bool) {

@@ -4,6 +4,53 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Per-chat memory database**: `clichat-host` now maintains
+  `~/.clichat/memory.sqlite3` with SQLite WAL + FTS5 indexing for each chat's
+  messages, summary, current topic, and topic history. New HTTP endpoints expose
+  `/v1/memory/{id}/summary` and `/v1/memory/{id}/search`.
+- **Smart chat titles**: chat titles/topics are now updated locally from the
+  latest user intent, with MCP `agent_chat_set_topic` still able to refine the
+  active subject. The visible chat name no longer depends on Claude remembering
+  to call a tool.
+- **One-command CLI installer**: `clichat install`, `clichat repair`,
+  `clichat status`, and `clichat logs` now provide the simple install/repair
+  flow previously split across shell scripts and helper commands.
+- **Go-native install path**: the module path is now
+  `github.com/luisdemarchi/CLIchat`, so users can install the CLI with
+  `go install github.com/luisdemarchi/CLIchat/cmd/clichat@latest`.
+
+### Fixed
+- **Terminal handoff per chat**: when an app-owned terminal closes, the chat now
+  stays intact and the UI shows an explicit "open terminal" action. Opening a
+  replacement terminal sends a compact handoff prompt built from that chat's
+  internal memory.
+- **Provider transfer**: the same chat can now be moved to another terminal
+  provider (Claude, Codex, Gemini). The old PTY is stopped, the provider is
+  switched on the existing instance, and the new provider receives the chat
+  handoff as startup context.
+- **Internal session isolation**: empty/home CWD chats now get a per-instance
+  sandbox directory, transcript linking chooses the closest matching internal
+  chat instead of map iteration order, and CWD matching no longer treats two
+  unrelated folders with the same basename as equivalent.
+- **Codex reconnect safety**: reconnect uses stored `codex resume <session-id>`
+  when available and starts a fresh isolated PTY otherwise. It no longer uses
+  the global `codex resume --last` fallback, which could attach a chat to
+  another terminal's rollout.
+- **Transcript tailing**: JSONL cursors are persisted by byte offset and
+  messages carry a source id, preventing restart-time transcript replay from
+  duplicating or cross-feeding bubbles.
+- **Gemini internal chats**: Gemini is restored as a provider, starts with an
+  explicit per-chat `--session-id`, and uses `--skip-trust` to avoid getting
+  stuck on the trust-folder prompt for app-owned sessions.
+
+### Removed
+- **`agentctl` binary**: hook, attach, list, install, and repair behavior moved
+  into the single `clichat` CLI. The uninstaller removes stale `agentctl` and
+  hook repair strips legacy `agentctl-managed` hook entries.
+
 ## [0.3.0] - 2026-05-01
 
 ### Added
