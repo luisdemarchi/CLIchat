@@ -661,6 +661,8 @@ func runInstall(repair bool) error {
 	info("%s: building CLIchat binaries", action)
 	hostBin := filepath.Join(binDir, "clichat-host")
 	cliBin := filepath.Join(binDir, "clichat")
+	_ = os.Remove(hostBin)
+	_ = os.Remove(cliBin)
 	if err := runCmd(repoRoot, "go", "build", "-o", hostBin, "./cmd/clichat-host"); err != nil {
 		return err
 	}
