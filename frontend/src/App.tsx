@@ -238,7 +238,10 @@ export function App() {
 
   const selected = useMemo(() => {
     if (!state) return undefined;
-    return state.sessions.find((s) => s.id === selectedID) ?? state.selected ?? state.sessions[0];
+    if (state.selected && (!selectedID || state.selected.id === selectedID)) {
+      return state.selected;
+    }
+    return state.sessions.find((s) => s.id === selectedID) ?? state.sessions[0];
   }, [selectedID, state]);
 
   const selectedStatus = useMemo(
@@ -266,7 +269,7 @@ export function App() {
     if (!selected) return;
     setLastSeen((prev) => {
       const current = prev[selected.id] ?? 0;
-      const total = (selected.messages ?? []).length;
+      const total = selected.messageCount ?? (selected.messages ?? []).length;
       if (current >= total) return prev;
       const next = { ...prev, [selected.id]: total };
       writeLastSeen(next);
@@ -276,7 +279,7 @@ export function App() {
 
   function unreadCount(s: Session): number {
     if (s.id === selectedID) return 0;
-    const total = (s.messages ?? []).length;
+    const total = s.messageCount ?? (s.messages ?? []).length;
     const seen = lastSeen[s.id] ?? 0;
     const unread = total - seen;
     return unread > 0 ? unread : 0;
@@ -285,7 +288,15 @@ export function App() {
   async function handleSelect(session: Session) {
     setSelectedID(session.id);
     try {
-      await selectSession(session.id);
+      const full = await selectSession(session.id);
+      setState((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          selected: full,
+          sessions: prev.sessions.map((s) => (s.id === full.id ? full : s)),
+        };
+      });
     } catch {
       // optimistic
     }

@@ -48,6 +48,7 @@ export interface Session {
   createdAt: string;
   updatedAt: string;
   messages: Message[];
+  messageCount?: number;
   pendingQuestion?: string;
   pendingActions: PendingAction[];
   terminalAttached: boolean;

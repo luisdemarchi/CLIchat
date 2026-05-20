@@ -58,6 +58,7 @@ type Session struct {
 	CreatedAt        string                `json:"createdAt"`
 	UpdatedAt        string                `json:"updatedAt"`
 	Messages         []agent.Message       `json:"messages"`
+	MessageCount     int                   `json:"messageCount"`
 	PendingQuestion  string                `json:"pendingQuestion,omitempty"`
 	PendingActions   []agent.PendingAction `json:"pendingActions"`
 	TerminalAttached bool                  `json:"terminalAttached"`
@@ -304,7 +305,7 @@ func (a *App) ListProviders() []provider.Provider {
 }
 
 func (a *App) ListSessions() []Session {
-	return a.sessions()
+	return a.sessions("")
 }
 
 // ReconnectSession is kept for older frontends. It now opens a fresh terminal
@@ -764,11 +765,12 @@ func (a *App) MirrorStatus() mirror.Status {
 // ---------------------------------------------------------------------------
 
 func (a *App) bootstrap() Bootstrap {
-	sessions := a.sessions()
+	selectedID := a.selected
+	sessions := a.sessions(selectedID)
 	var selected *Session
-	if a.selected != "" {
+	if selectedID != "" {
 		for i := range sessions {
-			if sessions[i].ID == a.selected {
+			if sessions[i].ID == selectedID {
 				copy := sessions[i]
 				selected = &copy
 				break
@@ -776,6 +778,8 @@ func (a *App) bootstrap() Bootstrap {
 		}
 	}
 	if selected == nil && len(sessions) > 0 {
+		selectedID = sessions[0].ID
+		sessions = a.sessions(selectedID)
 		copy := sessions[0]
 		selected = &copy
 	}
@@ -787,7 +791,7 @@ func (a *App) bootstrap() Bootstrap {
 	}
 }
 
-func (a *App) sessions() []Session {
+func (a *App) sessions(includeMessagesFor string) []Session {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	out := make([]Session, 0, len(a.instances))
@@ -797,7 +801,7 @@ func (a *App) sessions() []Session {
 		if inst.Origin == agent.OriginExternal {
 			continue
 		}
-		out = append(out, a.toSession(inst))
+		out = append(out, a.toSessionWithMessages(inst, inst.ID == includeMessagesFor))
 	}
 	// newest updated first
 	for i := 0; i < len(out)-1; i++ {
@@ -811,6 +815,10 @@ func (a *App) sessions() []Session {
 }
 
 func (a *App) toSession(inst agent.Instance) Session {
+	return a.toSessionWithMessages(inst, true)
+}
+
+func (a *App) toSessionWithMessages(inst agent.Instance, includeMessages bool) Session {
 	prov, _ := a.providerByID(provider.ID(inst.ProviderID))
 	avatar := avatarLabel(inst.Title, prov.Name)
 	tag := prov.Tag
@@ -828,6 +836,10 @@ func (a *App) toSession(inst agent.Instance) Session {
 	}
 	if last == "" && inst.Origin == agent.OriginExternal {
 		last = "External session detected. Waiting for the first reply."
+	}
+	messages := []agent.Message{}
+	if includeMessages {
+		messages = append(messages, inst.Messages...)
 	}
 
 	return Session{
@@ -849,7 +861,8 @@ func (a *App) toSession(inst agent.Instance) Session {
 		ExternalAttach:   external,
 		CreatedAt:        inst.CreatedAt,
 		UpdatedAt:        inst.UpdatedAt,
-		Messages:         append([]agent.Message(nil), inst.Messages...),
+		Messages:         messages,
+		MessageCount:     len(inst.Messages),
 		PendingQuestion:  inst.PendingQuestion,
 		PendingActions:   append([]agent.PendingAction(nil), inst.PendingActions...),
 		TerminalAttached: inst.TerminalAttached,
