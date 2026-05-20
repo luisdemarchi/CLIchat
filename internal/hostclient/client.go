@@ -63,7 +63,7 @@ type StateResponse struct {
 
 func (c *Client) State(ctx context.Context) (StateResponse, error) {
 	var out StateResponse
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/state", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/state?origin=internal", nil)
 	if err != nil {
 		return out, err
 	}
@@ -293,7 +293,7 @@ type wireState struct {
 }
 
 func (c *Client) SubscribeState(ctx context.Context, onEvent func(StateEvent)) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/state/events", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/state/events?origin=internal", nil)
 	if err != nil {
 		return err
 	}

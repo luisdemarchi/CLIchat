@@ -162,7 +162,7 @@ func (s *server) state(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"instances": s.store.Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"instances": filterStateInstances(r, s.store.Snapshot())})
 }
 
 func (s *server) stateEvents(w http.ResponseWriter, r *http.Request) {
@@ -194,7 +194,8 @@ func (s *server) stateEvents(w http.ResponseWriter, r *http.Request) {
 	defer close(out)
 	defer unsubscribe()
 
-	writeSSE(w, "snapshot", map[string]any{"instances": s.store.Snapshot()})
+	internalOnly := r.URL.Query().Get("origin") == string(agent.OriginInternal)
+	writeSSE(w, "snapshot", map[string]any{"instances": filterStateInstances(r, s.store.Snapshot())})
 	flusher.Flush()
 
 	ticker := time.NewTicker(20 * time.Second)
@@ -205,6 +206,9 @@ func (s *server) stateEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case events := <-out:
 			for _, event := range events {
+				if internalOnly && !internalStateEvent(event) {
+					continue
+				}
 				writeSSE(w, string(event.Kind), event)
 			}
 			flusher.Flush()
@@ -215,6 +219,27 @@ func (s *server) stateEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func filterStateInstances(r *http.Request, instances []agent.Instance) []agent.Instance {
+	if r.URL.Query().Get("origin") != string(agent.OriginInternal) {
+		return instances
+	}
+	out := make([]agent.Instance, 0, len(instances))
+	for _, inst := range instances {
+		if inst.Origin == agent.OriginInternal {
+			out = append(out, inst)
+		}
+	}
+	return out
+}
+
+func internalStateEvent(event agent.Event) bool {
+	if event.Kind != agent.EventInstanceUpdated {
+		return true
+	}
+	inst, ok := event.Payload.(agent.Instance)
+	return ok && inst.Origin == agent.OriginInternal
 }
 
 func (s *server) memoryRoute(w http.ResponseWriter, r *http.Request) {
