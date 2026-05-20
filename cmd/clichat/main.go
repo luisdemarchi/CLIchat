@@ -762,6 +762,7 @@ func runUninstall() error {
 	switch runtime.GOOS {
 	case "darwin":
 		plist := filepath.Join(home, "Library", "LaunchAgents", "com.clichat.host.plist")
+		_ = launchctl("bootout", launchdUserDomain(), plist)
 		_ = exec.Command("launchctl", "unload", plist).Run()
 		_ = os.Remove(plist)
 		_ = os.RemoveAll("/Applications/CLIchat.app")
@@ -1000,8 +1001,14 @@ func installService(hostBin string, logDir string) error {
 		if err := os.WriteFile(plist, []byte(content), 0o644); err != nil {
 			return err
 		}
-		_ = exec.Command("launchctl", "unload", plist).Run()
-		return exec.Command("launchctl", "load", plist).Run()
+		domain := launchdUserDomain()
+		_ = launchctl("bootout", domain, plist)
+		if err := launchctl("bootstrap", domain, plist); err != nil {
+			if fallbackErr := exec.Command("launchctl", "load", plist).Run(); fallbackErr != nil {
+				return err
+			}
+		}
+		return launchctl("kickstart", "-k", domain+"/com.clichat.host")
 	case "linux":
 		service := filepath.Join(mustHome(), ".config", "systemd", "user", "clichat.service")
 		if err := os.MkdirAll(filepath.Dir(service), 0o755); err != nil {
@@ -1029,6 +1036,18 @@ WantedBy=default.target
 	default:
 		return nil
 	}
+}
+
+func launchdUserDomain() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+func launchctl(args ...string) error {
+	out, err := exec.Command("launchctl", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("launchctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func needCommand(name string) error {
