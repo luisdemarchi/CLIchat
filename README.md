@@ -105,14 +105,15 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 One command, no source checkout:
 
 ```bash
-go install github.com/luisdemarchi/CLIchat/cmd/clichat@latest
+go install github.com/luisdemarchi/CLIchat/cmd/clichat@main
 clichat install
 ```
 
 The installer does, in order:
 
 1. **Resolves the CLIchat source from the Go module cache**. If needed, the Go
-   tool downloads `github.com/luisdemarchi/CLIchat@latest` automatically.
+   tool downloads the current `github.com/luisdemarchi/CLIchat` module
+   automatically.
 2. **Compiles `clichat-host` and `clichat`** into `~/.local/bin/`.
 3. **Prepares `~/.clichat/`**, including `state.json`, logs, and the
    `memory.sqlite3` database used for per-chat memory.

@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flow previously split across shell scripts and helper commands.
 - **Go-native install path**: the module path is now
   `github.com/luisdemarchi/CLIchat`, so users can install the CLI with
-  `go install github.com/luisdemarchi/CLIchat/cmd/clichat@latest`.
+  `go install github.com/luisdemarchi/CLIchat/cmd/clichat@main`.
 
 ### Fixed
 - **Terminal handoff per chat**: when an app-owned terminal closes, the chat now

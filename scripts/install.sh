@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CLIchat source-checkout installer.
 # Preferred public install:
-#   go install github.com/luisdemarchi/CLIchat/cmd/clichat@latest
+#   go install github.com/luisdemarchi/CLIchat/cmd/clichat@main
 #   clichat install
 
 set -euo pipefail

@@ -108,14 +108,14 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 Um comando, sem baixar o código manualmente:
 
 ```bash
-go install github.com/luisdemarchi/CLIchat/cmd/clichat@latest
+go install github.com/luisdemarchi/CLIchat/cmd/clichat@main
 clichat install
 ```
 
 O instalador faz, em ordem:
 
 1. **Resolve a source do CLIchat pelo cache de módulos do Go**. Se precisar,
-   o próprio Go baixa `github.com/luisdemarchi/CLIchat@latest`.
+   o próprio Go baixa o módulo atual `github.com/luisdemarchi/CLIchat`.
 2. **Compila `clichat-host` e `clichat`** em `~/.local/bin/`.
 3. **Prepara `~/.clichat/`**, incluindo `state.json`, logs e o banco
    `memory.sqlite3` usado para memória por chat.
